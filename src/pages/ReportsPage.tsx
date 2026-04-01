@@ -1,8 +1,9 @@
 import { useQuery } from '@tanstack/react-query'
-import { BarChart3, Landmark, ListFilter, PiggyBank, Wallet } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { BarChart3, Check, ChevronDown, Landmark, ListFilter, PiggyBank, Search, Wallet } from 'lucide-react'
+import { useDeferredValue, useMemo, useState } from 'react'
 
-import { Badge, EmptyState, ErrorState, FilterBar, FormField, LoadingState, PageHeader, SectionHeader, Surface } from '../components/ui'
+import { Badge, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, SectionHeader, Surface } from '../components/ui'
+import { cx } from '../lib/cx'
 import { apiErrorMessage, monatisApi } from '../lib/monatis-api'
 import {
   buildAccountLookup,
@@ -56,6 +57,9 @@ export function ReportsPage() {
   const [depenseCategories, setDepenseCategories] = useState<string[]>([])
   const [depenseSousCategories, setDepenseSousCategories] = useState<string[]>([])
   const [depenseBeneficiaire, setDepenseBeneficiaire] = useState('')
+  const [depenseSousCategoriesOpen, setDepenseSousCategoriesOpen] = useState(false)
+  const [depenseSousCategoriesSearch, setDepenseSousCategoriesSearch] = useState('')
+  const [depenseOpenCategoryNames, setDepenseOpenCategoryNames] = useState<string[]>([])
 
   const [remStart, setRemStart] = useState(todayIso())
   const [remEnd, setRemEnd] = useState(todayIso())
@@ -70,6 +74,7 @@ export function ReportsPage() {
   const [bilanTypes, setBilanTypes] = useState<string[]>([])
   const [bilanAccounts, setBilanAccounts] = useState<string[]>([])
   const [bilanTitulaire, setBilanTitulaire] = useState('')
+  const deferredDepenseSousCategoriesSearch = useDeferredValue(depenseSousCategoriesSearch)
 
   const internalAccountsQuery = useQuery({
     queryKey: ['comptes', 'internes'],
@@ -196,6 +201,39 @@ export function ReportsPage() {
     sousCategoriesQuery.data,
   ])
 
+  const filteredDepenseSousCategories = useMemo(() => {
+    const needle = depenseSousCategoriesSearch.trim().toLowerCase()
+    const items = sousCategoriesQuery.data ?? []
+
+    if (!needle) {
+      return items
+    }
+
+    return items.filter((item) =>
+      [item.nom, item.libelle, item.nomCategorie].filter(Boolean).some((value) => String(value).toLowerCase().includes(needle)),
+    )
+  }, [depenseSousCategoriesSearch, sousCategoriesQuery.data])
+
+  const groupedDepenseSousCategories = useMemo(() => {
+    const categories = categoriesQuery.data ?? []
+    const sousCategories = sousCategoriesQuery.data ?? []
+    const map = new Map<string, typeof sousCategories>()
+
+    categories.forEach((category) => {
+      map.set(category.nom, [])
+    })
+
+    sousCategories.forEach((item) => {
+      const categoryName = item.nomCategorie ?? 'Sans categorie'
+      map.set(categoryName, [...(map.get(categoryName) ?? []), item])
+    })
+
+    return Array.from(map.entries()).map(([name, items]) => ({
+      name,
+      items: [...items].sort((left, right) => left.nom.localeCompare(right.nom)),
+    }))
+  }, [categoriesQuery.data, sousCategoriesQuery.data])
+
   const remunerationReport = useMemo(() => {
     if (!operationsQuery.data || !internalAccountsQuery.data) {
       return null
@@ -240,6 +278,17 @@ export function ReportsPage() {
     operationsQuery.data,
     technicalAccountsQuery.data,
   ])
+
+  function toggleDepenseSousCategoryAccordion(name: string) {
+    setDepenseOpenCategoryNames((current) => {
+      if (current.includes(name)) {
+        return current.filter((item) => item !== name)
+      }
+
+      const next = [...current.filter((item) => item !== name), name]
+      return next.slice(-2)
+    })
+  }
 
   return (
     <div className="page-stack">
@@ -494,17 +543,29 @@ export function ReportsPage() {
 
             <div className="form-field">
               <span className="form-field-label">Sous-categories</span>
-              <div className="checkbox-grid">
-                {(sousCategoriesQuery.data ?? []).map((item) => {
-                  const checked = depenseSousCategories.includes(item.nom)
-                  return (
-                    <label key={item.nom} className={`toggle-chip ${checked ? 'checked' : ''}`}>
-                      <input type="checkbox" checked={checked} onChange={() => setDepenseSousCategories((current) => toggleValue(current, item.nom))} />
-                      <span>{item.nom}</span>
-                    </label>
-                  )
-                })}
-              </div>
+              <button
+                type="button"
+                className="picker-field"
+                onClick={() => {
+                  setDepenseSousCategoriesOpen(true)
+                  setDepenseSousCategoriesSearch('')
+                }}
+              >
+                <div className="picker-field-content">
+                  {depenseSousCategories.length ? (
+                    <div className="picker-chip-list">
+                      {depenseSousCategories.map((name) => (
+                        <span key={name} className="picker-chip">
+                          {name}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <span>Choisir des sous-categories</span>
+                  )}
+                </div>
+                <ChevronDown size={16} />
+              </button>
             </div>
           </Surface>
 
@@ -554,6 +615,91 @@ export function ReportsPage() {
           )}
         </div>
       ) : null}
+
+      <OverlayPanel
+        open={depenseSousCategoriesOpen}
+        onClose={() => {
+          setDepenseSousCategoriesOpen(false)
+          setDepenseSousCategoriesSearch('')
+        }}
+        title="Sous-categories"
+        width="regular"
+        overlayClassName="overlay-top"
+      >
+        <div className="page-stack">
+          <label className="search-field search-field-thin">
+            <Search size={14} />
+            <input
+              value={depenseSousCategoriesSearch}
+              onChange={(event) => setDepenseSousCategoriesSearch(event.target.value)}
+              placeholder="Chercher une sous-categorie..."
+            />
+          </label>
+
+          {deferredDepenseSousCategoriesSearch ? (
+            !filteredDepenseSousCategories.length ? (
+              <EmptyState title="Aucune sous-categorie" description="Aucun resultat pour cette recherche." />
+            ) : (
+              <div className="picker-option-list">
+                {filteredDepenseSousCategories.map((item) => {
+                  const selected = depenseSousCategories.includes(item.nom)
+                  return (
+                    <button
+                      key={item.nom}
+                      type="button"
+                      className={cx('picker-option', selected && 'selected')}
+                      onClick={() => setDepenseSousCategories((current) => toggleValue(current, item.nom))}
+                    >
+                      <div>
+                        <strong>{item.nom}</strong>
+                        <span>{item.nomCategorie ?? 'Sans categorie'}</span>
+                      </div>
+                      {selected ? <Check size={16} /> : null}
+                    </button>
+                  )
+                })}
+              </div>
+            )
+          ) : (
+            <div className="sub-category-groups">
+              {groupedDepenseSousCategories.map((category) => {
+                const open = depenseOpenCategoryNames.includes(category.name)
+                return (
+                  <div key={category.name} className={cx('sub-category-group', open && 'open')}>
+                    <button type="button" className="sub-category-group-toggle" onClick={() => toggleDepenseSousCategoryAccordion(category.name)}>
+                      <span>{category.name}</span>
+                      <ChevronDown size={14} />
+                    </button>
+
+                    {open ? (
+                      <div className="sub-category-options">
+                        {category.items.length ? (
+                          category.items.map((item) => {
+                            const selected = depenseSousCategories.includes(item.nom)
+                            return (
+                              <button
+                                key={item.nom}
+                                type="button"
+                                className={cx('sub-category-option', selected && 'selected')}
+                                onClick={() => setDepenseSousCategories((current) => toggleValue(current, item.nom))}
+                              >
+                                <span>{item.nom}</span>
+                                {selected ? <Check size={14} /> : null}
+                              </button>
+                            )
+                          })
+                        ) : (
+                          <div className="sub-category-empty">Aucune sous-categorie</div>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      </OverlayPanel>
 
       {tab === 'remunerations' ? (
         <div className="page-stack">

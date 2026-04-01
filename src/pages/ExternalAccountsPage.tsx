@@ -1,25 +1,28 @@
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Pencil, Plus, Save, Search, Trash2 } from 'lucide-react'
+import { Plus, Save, Search, Trash2 } from 'lucide-react'
 import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { z } from 'zod'
 
-import { Badge, Button, DataPanel, EmptyState, ErrorState, FilterBar, FormField, LoadingState, PageHeader, Surface } from '../components/ui'
+import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, Surface } from '../components/ui'
+import { cx } from '../lib/cx'
 import { apiErrorMessage, monatisApi } from '../lib/monatis-api'
 import { nullIfBlank } from '../lib/format'
 
 const schema = z.object({
-  identifiant: z.string().trim().min(1, 'L’identifiant est obligatoire.'),
+  identifiant: z.string().trim().min(1, 'L identifiant est obligatoire.'),
   libelle: z.string().optional(),
 })
 
 type ExternalAccountFormValues = z.infer<typeof schema>
+type DetailTab = 'overview' | 'edit'
 
 export function ExternalAccountsPage() {
   const queryClient = useQueryClient()
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [mode, setMode] = useState<'create' | 'edit'>('create')
+  const [createOpen, setCreateOpen] = useState(false)
+  const [detailTab, setDetailTab] = useState<DetailTab>('overview')
   const [search, setSearch] = useState('')
   const deferredSearch = useDeferredValue(search)
 
@@ -43,20 +46,26 @@ export function ExternalAccountsPage() {
   })
 
   useEffect(() => {
-    if (mode === 'edit' && detailQuery.data) {
-      form.reset({
-        identifiant: detailQuery.data.identifiant,
-        libelle: detailQuery.data.libelle ?? '',
-      })
+    if (!createOpen) {
+      return
     }
 
-    if (mode === 'create') {
-      form.reset({
-        identifiant: '',
-        libelle: '',
-      })
+    form.reset({
+      identifiant: '',
+      libelle: '',
+    })
+  }, [createOpen, form])
+
+  useEffect(() => {
+    if (!detailQuery.data) {
+      return
     }
-  }, [detailQuery.data, form, mode])
+
+    form.reset({
+      identifiant: detailQuery.data.identifiant,
+      libelle: detailQuery.data.libelle ?? '',
+    })
+  }, [detailQuery.data, form])
 
   const filteredAccounts = useMemo(() => {
     const list = accountsQuery.data ?? []
@@ -74,10 +83,11 @@ export function ExternalAccountsPage() {
         identifiant: values.identifiant.trim(),
         libelle: nullIfBlank(values.libelle ?? ''),
       }),
-    onSuccess: async (response) => {
+    onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['comptes', 'externes'] })
-      setSelectedId(response.identifiant)
-      setMode('edit')
+      setCreateOpen(false)
+      setSelectedId(null)
+      setDetailTab('overview')
     },
   })
 
@@ -90,6 +100,7 @@ export function ExternalAccountsPage() {
     onSuccess: async (response) => {
       await queryClient.invalidateQueries({ queryKey: ['comptes', 'externes'] })
       setSelectedId(response.identifiant)
+      setDetailTab('overview')
     },
   })
 
@@ -98,7 +109,7 @@ export function ExternalAccountsPage() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['comptes', 'externes'] })
       setSelectedId(null)
-      setMode('create')
+      setDetailTab('overview')
     },
   })
 
@@ -113,7 +124,7 @@ export function ExternalAccountsPage() {
           <Button
             tone="soft"
             onClick={() => {
-              setMode('create')
+              setCreateOpen(true)
               setSelectedId(null)
             }}
           >
@@ -126,114 +137,142 @@ export function ExternalAccountsPage() {
       {accountsQuery.isLoading ? <LoadingState label="Chargement des comptes externes..." /> : null}
       {hasError ? <ErrorState message={apiErrorMessage(hasError)} /> : null}
 
-      <div className="split-layout">
-        <DataPanel title="Externes">
-          <FilterBar>
-            <label className="search-field">
-              <Search size={16} />
-              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Rechercher un compte externe..." />
-            </label>
-          </FilterBar>
+      <Surface className="catalog-panel">
+        <FilterBar>
+          <label className="search-field">
+            <Search size={16} />
+            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Rechercher un compte externe..." />
+          </label>
+        </FilterBar>
 
-          {!filteredAccounts.length ? (
-            <EmptyState title="Aucun compte externe" description="Ajoute un compte pour demarrer." />
-          ) : (
-            <div className="list-stack">
-              {filteredAccounts.map((account) => (
-                <button key={account.identifiant} className={`list-row ${selectedId === account.identifiant ? 'selected' : ''}`} onClick={() => setSelectedId(account.identifiant)}>
+        {!filteredAccounts.length ? (
+          <EmptyState title="Aucun compte externe" description="Ajoute un compte pour demarrer." />
+        ) : (
+          <div className="catalog-grid">
+            {filteredAccounts.map((account) => (
+              <button
+                key={account.identifiant}
+                type="button"
+                className={cx('catalog-card', selectedId === account.identifiant && 'selected')}
+                onClick={() => {
+                  setSelectedId(account.identifiant)
+                  setDetailTab('overview')
+                }}
+              >
+                <div className="catalog-card-head">
                   <div>
                     <strong>{account.identifiant}</strong>
                     <p>{account.libelle ?? 'Sans libelle'}</p>
                   </div>
                   <Badge>Externe</Badge>
-                </button>
-              ))}
-            </div>
-          )}
-        </DataPanel>
-
-        <Surface className="editor-panel">
-          <div className="editor-panel-header">
-            <div>
-              <span className="eyebrow">{mode === 'create' ? 'Creation' : 'Edition'}</span>
-              <h2>{mode === 'create' ? 'Nouveau compte externe' : selectedId}</h2>
-              <p>Forme simple.</p>
-            </div>
-            {selectedId && mode === 'edit' ? (
-              <div className="button-row">
-                <Button tone="ghost" onClick={() => setMode('edit')}>
-                  <Pencil size={16} />
-                  Modifier
-                </Button>
-                <Button
-                  tone="danger"
-                  onClick={() => {
-                    if (window.confirm(`Supprimer ${selectedId} ?`)) {
-                      void deleteMutation.mutateAsync()
-                    }
-                  }}
-                >
-                  <Trash2 size={16} />
-                  Supprimer
-                </Button>
-              </div>
-            ) : null}
+                </div>
+              </button>
+            ))}
           </div>
+        )}
+      </Surface>
 
-          <form
-            className="form-grid"
-            onSubmit={form.handleSubmit(async (values) => {
-              if (mode === 'create') {
-                await createMutation.mutateAsync(values)
-              } else {
-                await updateMutation.mutateAsync(values)
-              }
-            })}
-          >
-            <FormField label="Identifiant" error={form.formState.errors.identifiant?.message}>
-              <input {...form.register('identifiant')} placeholder="MEDECINS, AMAZON, VENDEUR-IMMO..." />
-            </FormField>
+      <OverlayPanel open={createOpen} onClose={() => setCreateOpen(false)} title="Nouveau compte externe" width="regular">
+        <form
+          className="form-grid"
+          onSubmit={form.handleSubmit(async (values) => {
+            await createMutation.mutateAsync(values)
+          })}
+        >
+          <FormField label="Identifiant" error={form.formState.errors.identifiant?.message}>
+            <input {...form.register('identifiant')} placeholder="AMAZON, VENDEUR, IMPOTS..." />
+          </FormField>
 
-            <FormField label="Libelle" hint="Facultatif" error={form.formState.errors.libelle?.message}>
-              <textarea {...form.register('libelle')} rows={5} placeholder="Description detaillee du compte externe" />
-            </FormField>
+          <FormField label="Libelle" error={form.formState.errors.libelle?.message}>
+            <textarea {...form.register('libelle')} rows={5} placeholder="Facultatif" />
+          </FormField>
 
-            <div className="button-row">
-              <Button type="submit" disabled={createMutation.isPending || updateMutation.isPending}>
-                <Save size={16} />
-                {mode === 'create' ? 'Enregistrer' : 'Mettre a jour'}
-              </Button>
-              {mode === 'edit' ? (
-                <Button
-                  type="button"
-                  tone="ghost"
-                  onClick={() => {
-                    setSelectedId(null)
-                    setMode('create')
-                  }}
-                >
-                  Nouveau
-                </Button>
-              ) : null}
+          <div className="button-row">
+            <Button type="submit" disabled={createMutation.isPending}>
+              <Save size={16} />
+              Enregistrer
+            </Button>
+          </div>
+        </form>
+      </OverlayPanel>
+
+      <OverlayPanel
+        open={Boolean(selectedId)}
+        onClose={() => setSelectedId(null)}
+        title={selectedId ?? 'Compte externe'}
+        width="regular"
+        actions={
+          selectedId ? (
+            <Button
+              tone="danger"
+              onClick={() => {
+                if (window.confirm(`Supprimer ${selectedId} ?`)) {
+                  void deleteMutation.mutateAsync()
+                }
+              }}
+            >
+              <Trash2 size={16} />
+              Supprimer
+            </Button>
+          ) : null
+        }
+      >
+        {!selectedId ? null : detailQuery.isLoading ? (
+          <LoadingState label="Chargement..." />
+        ) : !detailQuery.data ? (
+          <EmptyState title="Compte introuvable" description="Impossible d afficher ce detail." />
+        ) : (
+          <>
+            <div className="modal-tabs">
+              <button type="button" className={cx('modal-tab-button', detailTab === 'overview' && 'active')} onClick={() => setDetailTab('overview')}>
+                Apercu
+              </button>
+              <button type="button" className={cx('modal-tab-button', detailTab === 'edit' && 'active')} onClick={() => setDetailTab('edit')}>
+                Modifier
+              </button>
             </div>
-          </form>
 
-          {detailQuery.data ? (
-            <Surface className="detail-panel">
-              <div className="detail-list">
-                <div>
-                  <span>Identifiant</span>
-                  <strong>{detailQuery.data.identifiant}</strong>
+            {detailTab === 'overview' ? (
+              <Surface className="inline-panel">
+                <div className="detail-list">
+                  <div>
+                    <span>Identifiant</span>
+                    <strong>{detailQuery.data.identifiant}</strong>
+                  </div>
+                  <div>
+                    <span>Libelle</span>
+                    <strong>{detailQuery.data.libelle ?? 'Sans libelle'}</strong>
+                  </div>
                 </div>
-                <div>
-                  <span>Libelle</span>
-                  <strong>{detailQuery.data.libelle ?? 'Sans libelle'}</strong>
+              </Surface>
+            ) : null}
+
+            {detailTab === 'edit' ? (
+              <form
+                className="form-grid"
+                onSubmit={form.handleSubmit(async (values) => {
+                  await updateMutation.mutateAsync(values)
+                })}
+              >
+                <FormField label="Identifiant" error={form.formState.errors.identifiant?.message}>
+                  <input {...form.register('identifiant')} />
+                </FormField>
+
+                <FormField label="Libelle" error={form.formState.errors.libelle?.message}>
+                  <textarea {...form.register('libelle')} rows={5} />
+                </FormField>
+
+                <div className="button-row">
+                  <Button type="submit" disabled={updateMutation.isPending}>
+                    <Save size={16} />
+                    Sauvegarder
+                  </Button>
                 </div>
-              </div>
-            </Surface>
-          ) : null}
-        </Surface>
-      </div>
+              </form>
+            ) : null}
+          </>
+        )}
+      </OverlayPanel>
     </div>
   )
 }

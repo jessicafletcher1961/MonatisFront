@@ -1,4 +1,4 @@
-import { AlertTriangle, LoaderCircle, Sparkles, type LucideIcon } from 'lucide-react'
+import { AlertTriangle, LoaderCircle, Sparkles, X, type LucideIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
 
 import { cx } from '../lib/cx'
@@ -218,5 +218,54 @@ export function DataPanel({
       <SectionHeader title={title} subtitle={subtitle} />
       {children}
     </Surface>
+  )
+}
+
+export function OverlayPanel({
+  open,
+  onClose,
+  title,
+  subtitle,
+  actions,
+  width = 'wide',
+  overlayClassName,
+  className,
+  children,
+}: {
+  open: boolean
+  onClose: () => void
+  title?: string
+  subtitle?: string
+  actions?: ReactNode
+  width?: 'regular' | 'wide'
+  overlayClassName?: string
+  className?: string
+  children: ReactNode
+}) {
+  if (!open) {
+    return null
+  }
+
+  return (
+    <div className={cx('floating-panel-overlay', overlayClassName)} role="dialog" aria-modal="true" aria-label={title ?? 'Panneau'}>
+      <button type="button" className="floating-panel-backdrop" aria-label="Fermer" onClick={onClose} />
+      <div className={cx('floating-panel-dialog', width === 'regular' ? 'regular' : 'wide')}>
+        <Surface className={cx('floating-panel', className)}>
+          <div className="floating-panel-header">
+            <div>
+              {title ? <h2>{title}</h2> : null}
+              {subtitle ? <p>{subtitle}</p> : null}
+            </div>
+            <div className="floating-panel-actions">
+              {actions}
+              <Button type="button" tone="ghost" className="floating-panel-close" onClick={onClose} aria-label="Fermer">
+                <X size={16} />
+              </Button>
+            </div>
+          </div>
+          <div className="floating-panel-body">{children}</div>
+        </Surface>
+      </div>
+    </div>
   )
 }

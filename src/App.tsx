@@ -1,6 +1,6 @@
-import { BarChart3, Database, LayoutGrid, Menu, ReceiptText, X } from 'lucide-react'
+import { BarChart3, Database, LayoutGrid, Menu, Moon, ReceiptText, SunMedium, X } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { Suspense, lazy, useState } from 'react'
+import { Suspense, lazy, useEffect, useState } from 'react'
 import { NavLink, Route, Routes, useLocation } from 'react-router-dom'
 
 import { Button, LoadingState } from './components/ui'
@@ -20,7 +20,24 @@ const navigation = [
 
 export default function App() {
   const [navOpen, setNavOpen] = useState(false)
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    if (typeof window === 'undefined') {
+      return 'dark'
+    }
+
+    const stored = window.localStorage.getItem('monatis-theme')
+    if (stored === 'light' || stored === 'dark') {
+      return stored
+    }
+
+    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+  })
   const location = useLocation()
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    window.localStorage.setItem('monatis-theme', theme)
+  }, [theme])
 
   return (
     <div className="app-shell">
@@ -48,6 +65,14 @@ export default function App() {
           </nav>
 
           <div className="shell-actions">
+            <Button
+              tone="ghost"
+              className="theme-button"
+              onClick={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
+              aria-label={theme === 'dark' ? 'Activer le mode clair' : 'Activer le mode sombre'}
+            >
+              {theme === 'dark' ? <SunMedium size={16} /> : <Moon size={16} />}
+            </Button>
             <Button
               tone="ghost"
               className="menu-button"

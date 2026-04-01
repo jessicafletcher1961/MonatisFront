@@ -1,11 +1,12 @@
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Pencil, Plus, Save, Search, Trash2 } from 'lucide-react'
-import { startTransition, useDeferredValue, useEffect, useMemo, useState } from 'react'
+import { Plus, Save, Search, Trash2 } from 'lucide-react'
+import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { z } from 'zod'
 
-import { Badge, Button, DataPanel, EmptyState, ErrorState, FilterBar, FormField, LoadingState, PageHeader, Surface } from '../components/ui'
+import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, SectionHeader, Surface } from '../components/ui'
+import { cx } from '../lib/cx'
 import { apiErrorMessage, type ReferenceDetail, type ReferenceListItem, type ReferenceResource, monatisApi } from '../lib/monatis-api'
 import { nullIfBlank } from '../lib/format'
 
@@ -25,18 +26,19 @@ const baseSchema = z.object({
 })
 
 type ReferenceFormValues = z.infer<typeof baseSchema>
+type DetailTab = 'overview' | 'edit'
 
 function listHint(resource: ReferenceResource, item: ReferenceListItem): string {
   switch (resource) {
     case 'banque':
     case 'titulaire':
-      return `${item.identifiantsComptesInternes?.length ?? 0} compte(s) lie(s)`
+      return `${item.identifiantsComptesInternes?.length ?? 0} compte(s)`
     case 'categorie':
       return `${item.nomsSousCategories?.length ?? 0} sous-categorie(s)`
     case 'souscategorie':
-      return item.nomCategorie ? `Categorie : ${item.nomCategorie}` : 'Categorie non renseignee'
+      return item.nomCategorie ? `Categorie · ${item.nomCategorie}` : 'Sans categorie'
     default:
-      return item.libelle ?? 'Reference simple'
+      return item.libelle ?? 'Reference'
   }
 }
 
@@ -61,9 +63,13 @@ function detailSummary(resource: ReferenceResource, detail?: ReferenceDetail | n
 export function ReferencePage({ config }: { config: ReferencePageConfig }) {
   const queryClient = useQueryClient()
   const [selectedName, setSelectedName] = useState<string | null>(null)
-  const [mode, setMode] = useState<'create' | 'edit'>('create')
+  const [createOpen, setCreateOpen] = useState(false)
+  const [detailTab, setDetailTab] = useState<DetailTab>('overview')
+  const [categoryPickerOpen, setCategoryPickerOpen] = useState(false)
+  const [categorySearch, setCategorySearch] = useState('')
   const [search, setSearch] = useState('')
   const deferredSearch = useDeferredValue(search)
+  const deferredCategorySearch = useDeferredValue(categorySearch)
 
   const listQuery = useQuery({
     queryKey: ['references', config.resource],
@@ -92,22 +98,28 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
   })
 
   useEffect(() => {
-    if (mode === 'edit' && detailQuery.data) {
-      form.reset({
-        nom: detailQuery.data.nom,
-        libelle: detailQuery.data.libelle ?? '',
-        nomCategorie: detailQuery.data.categorie?.nom ?? '',
-      })
+    if (!createOpen) {
+      return
     }
 
-    if (mode === 'create') {
-      form.reset({
-        nom: '',
-        libelle: '',
-        nomCategorie: '',
-      })
+    form.reset({
+      nom: '',
+      libelle: '',
+      nomCategorie: '',
+    })
+  }, [createOpen, form])
+
+  useEffect(() => {
+    if (!detailQuery.data) {
+      return
     }
-  }, [detailQuery.data, form, mode])
+
+    form.reset({
+      nom: detailQuery.data.nom,
+      libelle: detailQuery.data.libelle ?? '',
+      nomCategorie: detailQuery.data.categorie?.nom ?? '',
+    })
+  }, [detailQuery.data, form])
 
   const filteredItems = useMemo(() => {
     const needle = deferredSearch.trim().toLowerCase()
@@ -124,6 +136,17 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
     )
   }, [deferredSearch, listQuery.data])
 
+  const filteredCategories = useMemo(() => {
+    const needle = deferredCategorySearch.trim().toLowerCase()
+    const items = categoriesQuery.data ?? []
+
+    if (!needle) {
+      return items
+    }
+
+    return items.filter((item) => [item.nom, item.libelle].filter(Boolean).some((value) => String(value).toLowerCase().includes(needle)))
+  }, [categoriesQuery.data, deferredCategorySearch])
+
   const createMutation = useMutation({
     mutationFn: async (values: ReferenceFormValues) => {
       if (config.resource === 'souscategorie') {
@@ -139,10 +162,11 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
         libelle: nullIfBlank(values.libelle ?? ''),
       })
     },
-    onSuccess: async (response) => {
+    onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['references', config.resource] })
-      setSelectedName(response.nom)
-      setMode('edit')
+      setCreateOpen(false)
+      setSelectedName(null)
+      setDetailTab('overview')
     },
   })
 
@@ -168,6 +192,7 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
     onSuccess: async (response) => {
       await queryClient.invalidateQueries({ queryKey: ['references', config.resource] })
       setSelectedName(response.nom)
+      setDetailTab('overview')
     },
   })
 
@@ -176,14 +201,13 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
       if (!selectedName) {
         return
       }
+
       return monatisApi.deleteReference(config.resource, selectedName)
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['references', config.resource] })
-      startTransition(() => {
-        setSelectedName(null)
-        setMode('create')
-      })
+      setSelectedName(null)
+      setDetailTab('overview')
     },
   })
 
@@ -199,8 +223,9 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
           <Button
             tone="soft"
             onClick={() => {
-              setMode('create')
+              setCreateOpen(true)
               setSelectedName(null)
+              setCategorySearch('')
             }}
           >
             <Plus size={16} />
@@ -212,150 +237,221 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
       {listQuery.isLoading ? <LoadingState label={`Chargement des ${config.plural}...`} /> : null}
       {activeError ? <ErrorState message={apiErrorMessage(activeError)} /> : null}
 
-      <div className="split-layout">
-        <DataPanel title={config.plural}>
-          <FilterBar>
-            <label className="search-field">
-              <Search size={16} />
-              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`Rechercher ${config.singular.toLowerCase()}...`} />
-            </label>
-          </FilterBar>
+      <Surface className="catalog-panel">
+        <FilterBar>
+          <label className="search-field">
+            <Search size={16} />
+            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`Rechercher ${config.singular.toLowerCase()}...`} />
+          </label>
+        </FilterBar>
 
-          {!filteredItems.length ? (
-            <EmptyState title={`Aucune ${config.singular.toLowerCase()} visible`} description="Ajuste le filtre ou ajoute une entree." />
-          ) : (
-            <div className="list-stack">
-              {filteredItems.map((item) => (
-                <button key={item.nom} className={`list-row ${selectedName === item.nom ? 'selected' : ''}`} onClick={() => setSelectedName(item.nom)}>
+        {!filteredItems.length ? (
+          <EmptyState title={`Aucune ${config.singular.toLowerCase()} visible`} description="Ajuste le filtre ou ajoute une entree." />
+        ) : (
+          <div className="catalog-grid">
+            {filteredItems.map((item) => (
+              <button
+                key={item.nom}
+                type="button"
+                className={cx('catalog-card', selectedName === item.nom && 'selected')}
+                onClick={() => {
+                  setSelectedName(item.nom)
+                  setDetailTab('overview')
+                }}
+              >
+                <div className="catalog-card-head">
                   <div>
                     <strong>{item.nom}</strong>
                     <p>{item.libelle ?? 'Sans libelle'}</p>
                   </div>
                   <Badge>{listHint(config.resource, item)}</Badge>
-                </button>
-              ))}
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </Surface>
+
+      <OverlayPanel open={createOpen} onClose={() => setCreateOpen(false)} title={`Nouvelle ${config.singular}`} width="regular">
+        <form
+          className="form-grid"
+          onSubmit={form.handleSubmit(async (values) => {
+            if (config.resource === 'souscategorie' && !values.nomCategorie?.trim()) {
+              form.setError('nomCategorie', { message: 'La categorie est obligatoire.' })
+              return
+            }
+
+            await createMutation.mutateAsync(values)
+          })}
+        >
+          <FormField label="Nom" error={form.formState.errors.nom?.message}>
+            <input {...form.register('nom')} placeholder={`Nom ${config.singular.toLowerCase()}`} />
+          </FormField>
+
+          <FormField label="Libelle" error={form.formState.errors.libelle?.message}>
+            <textarea {...form.register('libelle')} rows={4} placeholder="Facultatif" />
+          </FormField>
+
+          {config.resource === 'souscategorie' ? (
+            <FormField label="Categorie de rattachement" error={form.formState.errors.nomCategorie?.message}>
+              <button type="button" className="picker-field" onClick={() => setCategoryPickerOpen(true)}>
+                <div className="picker-field-content">
+                  {form.getValues('nomCategorie') ? (
+                    <div className="picker-chip-list">
+                      <span className="picker-chip">{form.getValues('nomCategorie')}</span>
+                    </div>
+                  ) : (
+                    <span>Choisir une categorie</span>
+                  )}
+                </div>
+                <Search size={16} />
+              </button>
+            </FormField>
+          ) : null}
+
+          <div className="button-row">
+            <Button type="submit" disabled={createMutation.isPending}>
+              <Save size={16} />
+              Enregistrer
+            </Button>
+          </div>
+        </form>
+      </OverlayPanel>
+
+      <OverlayPanel open={categoryPickerOpen} onClose={() => setCategoryPickerOpen(false)} title="Choisir une categorie" width="regular" overlayClassName="overlay-top">
+        <div className="page-stack">
+          <label className="search-field search-field-thin">
+            <Search size={14} />
+            <input value={categorySearch} onChange={(event) => setCategorySearch(event.target.value)} placeholder="Chercher une categorie..." />
+          </label>
+
+          {!filteredCategories.length ? (
+            <EmptyState title="Aucune categorie" description="Aucun resultat pour cette recherche." />
+          ) : (
+            <div className="picker-option-list">
+              {filteredCategories.map((category) => {
+                const selected = form.getValues('nomCategorie') === category.nom
+                return (
+                  <button
+                    key={category.nom}
+                    type="button"
+                    className={cx('picker-option', selected && 'selected')}
+                    onClick={() => {
+                      form.setValue('nomCategorie', category.nom)
+                      setCategoryPickerOpen(false)
+                    }}
+                  >
+                    <div>
+                      <strong>{category.nom}</strong>
+                      <span>{category.libelle ?? 'Categorie'}</span>
+                    </div>
+                  </button>
+                )
+              })}
             </div>
           )}
-        </DataPanel>
+        </div>
+      </OverlayPanel>
 
-        <Surface className="editor-panel">
-          <div className="editor-panel-header">
-            <div>
-              <span className="eyebrow">{mode === 'create' ? 'Creation' : 'Edition'}</span>
-              <h2>{mode === 'create' ? `Nouvelle ${config.singular}` : detailQuery.data?.nom ?? `Editer ${config.singular}`}</h2>
-              <p>Edition simple.</p>
+      <OverlayPanel
+        open={Boolean(selectedName)}
+        onClose={() => setSelectedName(null)}
+        title={selectedName ?? config.title}
+        width="regular"
+        actions={
+          selectedName ? (
+            <Button
+              tone="danger"
+              onClick={() => {
+                if (window.confirm(`Supprimer ${selectedName} ?`)) {
+                  void deleteMutation.mutateAsync()
+                }
+              }}
+            >
+              <Trash2 size={16} />
+              Supprimer
+            </Button>
+          ) : null
+        }
+      >
+        {!selectedName ? null : detailQuery.isLoading ? (
+          <LoadingState label={`Chargement du detail de ${selectedName}...`} />
+        ) : !detailQuery.data ? (
+          <EmptyState title="Reference introuvable" description="Impossible d afficher ce detail." />
+        ) : (
+          <>
+            <div className="modal-tabs">
+              <button type="button" className={cx('modal-tab-button', detailTab === 'overview' && 'active')} onClick={() => setDetailTab('overview')}>
+                Apercu
+              </button>
+              <button type="button" className={cx('modal-tab-button', detailTab === 'edit' && 'active')} onClick={() => setDetailTab('edit')}>
+                Modifier
+              </button>
             </div>
-            {selectedName && mode === 'edit' ? (
-              <div className="button-row">
-                <Button tone="ghost" onClick={() => setMode('edit')}>
-                  <Pencil size={16} />
-                  Modifier
-                </Button>
-                <Button
-                  tone="danger"
-                  onClick={() => {
-                    if (window.confirm(`Supprimer ${selectedName} ?`)) {
-                      void deleteMutation.mutateAsync()
-                    }
-                  }}
-                >
-                  <Trash2 size={16} />
-                  Supprimer
-                </Button>
-              </div>
-            ) : null}
-          </div>
 
-          <form
-            className="form-grid"
-            onSubmit={form.handleSubmit(async (values) => {
-              if (config.resource === 'souscategorie' && !values.nomCategorie?.trim()) {
-                form.setError('nomCategorie', { message: 'La categorie est obligatoire.' })
-                return
-              }
-
-              if (mode === 'create') {
-                await createMutation.mutateAsync(values)
-              } else {
-                await updateMutation.mutateAsync(values)
-              }
-            })}
-          >
-            <FormField label="Nom" error={form.formState.errors.nom?.message}>
-              <input {...form.register('nom')} placeholder={`Nom ${config.singular.toLowerCase()}`} />
-            </FormField>
-
-            <FormField label="Libelle" hint="Facultatif. Laisser vide pour ne rien stocker." error={form.formState.errors.libelle?.message}>
-              <textarea {...form.register('libelle')} rows={4} placeholder="Description lisible pour l’interface" />
-            </FormField>
-
-            {config.resource === 'souscategorie' ? (
-              <FormField label="Categorie de rattachement" error={form.formState.errors.nomCategorie?.message}>
-                <select {...form.register('nomCategorie')}>
-                  <option value="">Choisir une categorie</option>
-                  {(categoriesQuery.data ?? []).map((category) => (
-                    <option key={category.nom} value={category.nom}>
-                      {category.nom}
-                    </option>
-                  ))}
-                </select>
-              </FormField>
-            ) : null}
-
-            <div className="button-row">
-              <Button type="submit" disabled={createMutation.isPending || updateMutation.isPending}>
-                <Save size={16} />
-                {mode === 'create' ? 'Enregistrer' : 'Mettre a jour'}
-              </Button>
-              {mode === 'edit' ? (
-                <Button
-                  type="button"
-                  tone="ghost"
-                  onClick={() => {
-                    setMode('create')
-                    setSelectedName(null)
-                  }}
-                >
-                  Revenir a la creation
-                </Button>
-              ) : null}
-            </div>
-          </form>
-
-          {selectedName && detailQuery.isLoading ? <LoadingState label={`Chargement du detail de ${selectedName}...`} /> : null}
-
-          {detailQuery.data ? (
-            <Surface className="detail-panel">
-              <div className="section-header">
-                <div>
-                  <h2>Contexte metier</h2>
-                  <p>Ce bloc affiche les relations deja presentes cote back.</p>
-                </div>
-              </div>
-              <div className="detail-list">
-                <div>
-                  <span>Nom</span>
-                  <strong>{detailQuery.data.nom}</strong>
-                </div>
-                <div>
-                  <span>Libelle</span>
-                  <strong>{detailQuery.data.libelle ?? 'Sans libelle'}</strong>
-                </div>
+            {detailTab === 'overview' ? (
+              <Surface className="inline-panel">
+                <SectionHeader title={detailQuery.data.nom} subtitle={detailQuery.data.libelle ?? 'Sans libelle'} />
                 {detailSummary(config.resource, detailQuery.data).length ? (
-                  <div>
-                    <span>Relations</span>
-                    <div className="pill-list">
-                      {detailSummary(config.resource, detailQuery.data).map((item) => (
-                        <Badge key={item}>{item}</Badge>
-                      ))}
-                    </div>
+                  <div className="pill-list">
+                    {detailSummary(config.resource, detailQuery.data).map((item) => (
+                      <Badge key={item}>{item}</Badge>
+                    ))}
                   </div>
+                ) : (
+                  <div className="catalog-meta">Aucune relation supplementaire.</div>
+                )}
+              </Surface>
+            ) : null}
+
+            {detailTab === 'edit' ? (
+              <form
+                className="form-grid"
+                onSubmit={form.handleSubmit(async (values) => {
+                  if (config.resource === 'souscategorie' && !values.nomCategorie?.trim()) {
+                    form.setError('nomCategorie', { message: 'La categorie est obligatoire.' })
+                    return
+                  }
+
+                  await updateMutation.mutateAsync(values)
+                })}
+              >
+                <FormField label="Nom" error={form.formState.errors.nom?.message}>
+                  <input {...form.register('nom')} />
+                </FormField>
+
+                <FormField label="Libelle" error={form.formState.errors.libelle?.message}>
+                  <textarea {...form.register('libelle')} rows={4} />
+                </FormField>
+
+                {config.resource === 'souscategorie' ? (
+                  <FormField label="Categorie de rattachement" error={form.formState.errors.nomCategorie?.message}>
+                    <button type="button" className="picker-field" onClick={() => setCategoryPickerOpen(true)}>
+                      <div className="picker-field-content">
+                        {form.getValues('nomCategorie') ? (
+                          <div className="picker-chip-list">
+                            <span className="picker-chip">{form.getValues('nomCategorie')}</span>
+                          </div>
+                        ) : (
+                          <span>Choisir une categorie</span>
+                        )}
+                      </div>
+                      <Search size={16} />
+                    </button>
+                  </FormField>
                 ) : null}
-              </div>
-            </Surface>
-          ) : null}
-        </Surface>
-      </div>
+
+                <div className="button-row">
+                  <Button type="submit" disabled={updateMutation.isPending}>
+                    <Save size={16} />
+                    Sauvegarder
+                  </Button>
+                </div>
+              </form>
+            ) : null}
+          </>
+        )}
+      </OverlayPanel>
     </div>
   )
 }

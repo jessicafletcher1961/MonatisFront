@@ -1,16 +1,25 @@
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useFieldArray, useForm, useWatch } from 'react-hook-form'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Check, ChevronDown, ChevronUp, Plus, Save, Search, Trash2, X } from 'lucide-react'
+import { ArrowLeft, Check, ChevronDown, Pencil, Plus, Save, Search, Trash2, X } from 'lucide-react'
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { z } from 'zod'
 
-import { Badge, Button, DataPanel, EmptyState, ErrorState, FilterBar, FormField, LoadingState, PageHeader, SectionHeader, Surface } from '../components/ui'
+import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, SectionHeader, Surface } from '../components/ui'
 import { cx } from '../lib/cx'
-import { formatCurrencyFromCents, formatDate, formatShortDate, nullIfBlank, parseMoneyToCents, toMoneyInput, todayIso } from '../lib/format'
-import { apiErrorMessage, type CompteSummary, type OperationBasic, type OperationLinePayload, type TypeOperation, monatisApi } from '../lib/monatis-api'
+import { formatCurrencyFromCents, formatDate, nullIfBlank, parseMoneyToCents, toMoneyInput, todayIso } from '../lib/format'
+import { apiErrorMessage, type CompteSummary, type OperationBasic, type OperationLinePayload, type ReferenceListItem, type TypeOperation, monatisApi } from '../lib/monatis-api'
 import { readableOperationLabel, sortOperationsDesc, technicalAccountFallback } from '../lib/reporting'
+
+const operationLineSchema = z.object({
+  numeroLigne: z.number().nullable().optional(),
+  libelle: z.string().optional(),
+  dateComptabilisation: z.string().optional(),
+  montant: z.string().optional(),
+  nomSousCategorie: z.string().optional(),
+  nomsBeneficiaires: z.array(z.string()),
+})
 
 const createSchema = z.object({
   numero: z.string().optional(),
@@ -22,6 +31,7 @@ const createSchema = z.object({
   identifiantCompteRecette: z.string().optional(),
   nomSousCategorie: z.string().optional(),
   nomsBeneficiaires: z.array(z.string()),
+  lignes: z.array(operationLineSchema),
 })
 
 const editSchema = z.object({
@@ -33,22 +43,23 @@ const editSchema = z.object({
   identifiantCompteDepense: z.string().optional(),
   identifiantCompteRecette: z.string().optional(),
   pointee: z.boolean(),
-  lignes: z.array(
-    z.object({
-      numeroLigne: z.number().nullable().optional(),
-      libelle: z.string().optional(),
-      dateComptabilisation: z.string().optional(),
-      montant: z.string().optional(),
-      nomSousCategorie: z.string().optional(),
-      nomsBeneficiaires: z.array(z.string()),
-    }),
-  ),
+  lignes: z.array(operationLineSchema),
 })
 
+type OperationLineFormValues = z.infer<typeof operationLineSchema>
 type CreateFormValues = z.infer<typeof createSchema>
 type EditFormValues = z.infer<typeof editSchema>
-type CreateStep = 'type' | 'amount' | 'depense' | 'recette' | 'review'
+type CreateStep = 'type' | 'depense' | 'recette' | 'amount' | 'review'
+type QuickEditTarget = 'type' | 'depense' | 'recette' | 'amount' | null
+type DetailTab = 'overview' | 'edit' | 'lines'
 type OperationTypeGroup = 'incoming' | 'outgoing' | 'internal' | 'technical' | 'other'
+type SubCategoryPickerTarget =
+  | { kind: 'create' }
+  | { kind: 'createLine'; index: number }
+  | { kind: 'newCreateLine' }
+  | { kind: 'line'; index: number }
+  | { kind: 'newLine' }
+  | null
 
 const CREATE_DEFAULTS: CreateFormValues = {
   numero: '',
@@ -60,14 +71,15 @@ const CREATE_DEFAULTS: CreateFormValues = {
   identifiantCompteRecette: '',
   nomSousCategorie: '',
   nomsBeneficiaires: [],
+  lignes: [],
 }
 
 const OPERATION_TYPE_GROUP_META: Array<{ key: OperationTypeGroup; label: string }> = [
   { key: 'incoming', label: 'Exterieur vers le foyer' },
   { key: 'outgoing', label: 'Foyer vers l exterieur' },
-  { key: 'internal', label: 'Entre vos comptes' },
+  { key: 'internal', label: 'Interne vers interne' },
   { key: 'technical', label: 'Mouvements du compte' },
-  { key: 'other', label: 'Autres' },
+  { key: 'other', label: 'Autre' },
 ]
 
 function operationTypeCode(operation: OperationBasic): string {
@@ -91,6 +103,94 @@ function beneficiariesForLine(operation: OperationBasic, lineIndex: number): str
   return line?.nomsBeneficiaires ?? line?.beneficiaires?.map((item) => item.nom) ?? []
 }
 
+function beneficiaryNamesForDisplay(line: OperationBasic['lignes'][number]): string[] {
+  return line.nomsBeneficiaires ?? line.beneficiaires?.map((item) => item.nom) ?? []
+}
+
+function subCategoryNameForLine(line: OperationBasic['lignes'][number]): string {
+  return line.nomSousCategorie?.trim() || line.sousCategorie?.nom?.trim() || ''
+}
+
+function makeOperationLineValues(date: string): OperationLineFormValues {
+  return {
+    numeroLigne: null,
+    libelle: '',
+    dateComptabilisation: date,
+    montant: '',
+    nomSousCategorie: '',
+    nomsBeneficiaires: [],
+  }
+}
+
+function normalizeOperationLineValues(line?: Partial<OperationLineFormValues> | null): OperationLineFormValues {
+  return {
+    numeroLigne: line?.numeroLigne ?? null,
+    libelle: line?.libelle ?? '',
+    dateComptabilisation: line?.dateComptabilisation ?? '',
+    montant: line?.montant ?? '',
+    nomSousCategorie: line?.nomSousCategorie ?? '',
+    nomsBeneficiaires: [...(line?.nomsBeneficiaires ?? [])].sort((left, right) => left.localeCompare(right)),
+  }
+}
+
+function operationLineValuesEqual(left?: Partial<OperationLineFormValues> | null, right?: Partial<OperationLineFormValues> | null): boolean {
+  const a = normalizeOperationLineValues(left)
+  const b = normalizeOperationLineValues(right)
+
+  return (
+    a.numeroLigne === b.numeroLigne &&
+    a.libelle === b.libelle &&
+    a.dateComptabilisation === b.dateComptabilisation &&
+    a.montant === b.montant &&
+    a.nomSousCategorie === b.nomSousCategorie &&
+    a.nomsBeneficiaires.length === b.nomsBeneficiaires.length &&
+    a.nomsBeneficiaires.every((value, index) => value === b.nomsBeneficiaires[index])
+  )
+}
+
+function buildOperationLinePayloads(lines: OperationLineFormValues[]): OperationLinePayload[] {
+  return lines
+    .filter((line) => (line.montant?.trim() ?? '') !== '')
+    .map((line) => ({
+      numeroLigne: line.numeroLigne,
+      libelle: nullIfBlank(line.libelle ?? ''),
+      dateComptabilisation: nullIfBlank(line.dateComptabilisation ?? ''),
+      montantEnCentimes: parseMoneyToCents(line.montant ?? '0'),
+      nomSousCategorie: nullIfBlank(line.nomSousCategorie ?? ''),
+      nomsBeneficiaires: line.nomsBeneficiaires ?? [],
+    }))
+}
+
+function sumOperationLinePayloads(lines: OperationLinePayload[]): number {
+  return lines.reduce((total, line) => total + (line.montantEnCentimes ?? 0), 0)
+}
+
+function sumOperationLineValues(lines: Array<Partial<OperationLineFormValues> | undefined>, excludedIndex?: number): number {
+  return lines.reduce((total, line, index) => {
+    if (index === excludedIndex) {
+      return total
+    }
+
+    return total + parseMoneyToCents(line?.montant ?? '')
+  }, 0)
+}
+
+function maxAllowedAmountForLine(totalCents: number, lines: Array<Partial<OperationLineFormValues> | undefined>, index: number): number {
+  return Math.max(0, totalCents - sumOperationLineValues(lines, index))
+}
+
+function amountLimitMessage(totalCents: number, lines: Array<Partial<OperationLineFormValues> | undefined>, index: number): string | null {
+  const current = parseMoneyToCents(lines[index]?.montant ?? '')
+  const max = maxAllowedAmountForLine(totalCents, lines, index)
+  return current > max ? `Max ${formatCurrencyFromCents(max)}` : null
+}
+
+function amountLimitMessageForNewLine(totalCents: number, lines: Array<Partial<OperationLineFormValues> | undefined>, amount: string): string | null {
+  const current = parseMoneyToCents(amount)
+  const max = Math.max(0, totalCents - sumOperationLineValues(lines))
+  return current > max ? `Max ${formatCurrencyFromCents(max)}` : null
+}
+
 function normalizedText(value: string): string {
   return value.trim().toLowerCase()
 }
@@ -104,15 +204,15 @@ function matchesNeedle(value: string, needle: string): boolean {
 }
 
 function operationTypeGroup(code: string): OperationTypeGroup {
-  if (code === 'RECETTE') {
+  if (['RECETTE', 'ACHAT'].includes(code)) {
     return 'incoming'
   }
 
-  if (code === 'DEPENSE') {
+  if (['DEPENSE', 'VENTE'].includes(code)) {
     return 'outgoing'
   }
 
-  if (['TRANSFERT', 'DEPOT', 'INVEST', 'RETRAIT', 'LIQUID', 'VENTE', 'ACHAT'].includes(code)) {
+  if (['TRANSFERT', 'DEPOT', 'INVEST', 'RETRAIT', 'LIQUID'].includes(code)) {
     return 'internal'
   }
 
@@ -138,36 +238,36 @@ function flowLabelsForType(code: string): {
 
   if (group === 'incoming') {
     return {
-      depenseStep: 'Provenance',
-      recetteStep: 'Compte credite',
-      depenseSummary: 'Provenance',
-      recetteSummary: 'Compte credite',
+      depenseStep: 'Origine',
+      recetteStep: 'Compte du foyer',
+      depenseSummary: 'Origine',
+      recetteSummary: 'Compte du foyer',
     }
   }
 
   if (group === 'outgoing') {
     return {
-      depenseStep: 'Compte debite',
-      recetteStep: 'Destinataire',
-      depenseSummary: 'Compte debite',
-      recetteSummary: 'Destinataire',
+      depenseStep: 'Compte du foyer',
+      recetteStep: 'Destination',
+      depenseSummary: 'Compte du foyer',
+      recetteSummary: 'Destination',
     }
   }
 
   if (group === 'technical') {
     return {
-      depenseStep: 'Compte impacte',
-      recetteStep: 'Contrepartie technique',
-      depenseSummary: 'Compte impacte',
+      depenseStep: 'Compte concerne',
+      recetteStep: 'Contrepartie',
+      depenseSummary: 'Compte concerne',
       recetteSummary: 'Contrepartie',
     }
   }
 
   return {
-    depenseStep: 'Compte de depart',
+    depenseStep: 'Compte source',
     recetteStep: "Compte d arrivee",
-    depenseSummary: 'Depart',
-    recetteSummary: 'Arrivee',
+    depenseSummary: 'Compte source',
+    recetteSummary: 'Compte d arrivee',
   }
 }
 
@@ -175,25 +275,48 @@ function selectedAccountLabel(accounts: CompteSummary[], identifiant: string): s
   return accounts.find((account) => account.identifiant === identifiant)?.identifiant ?? identifiant
 }
 
+function compactOperationMeta(operation: OperationBasic): string {
+  return [operation.numero, formatDate(operation.dateValeur)].join(' · ')
+}
+
 export function OperationsPage() {
   const queryClient = useQueryClient()
   const location = useLocation()
   const navigate = useNavigate()
   const [selectedNumero, setSelectedNumero] = useState<string | null>(null)
+  const [detailTab, setDetailTab] = useState<DetailTab>('overview')
   const [search, setSearch] = useState('')
-  const [typeFilter, setTypeFilter] = useState('TOUS')
+  const [selectedTypeFilters, setSelectedTypeFilters] = useState<string[]>([])
+  const [typeFilterPickerOpen, setTypeFilterPickerOpen] = useState(false)
+  const [typeFilterSearch, setTypeFilterSearch] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
   const [createStep, setCreateStep] = useState<CreateStep>('type')
-  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [createOptionsOpen, setCreateOptionsOpen] = useState(false)
+  const [expandedOverviewLineIndex, setExpandedOverviewLineIndex] = useState<number | null>(null)
+  const [expandedCreateLineIndex, setExpandedCreateLineIndex] = useState<number | null>(null)
+  const [createLineCreateOpen, setCreateLineCreateOpen] = useState(false)
+  const [createLineBaselines, setCreateLineBaselines] = useState<OperationLineFormValues[]>([])
+  const [quickEditTarget, setQuickEditTarget] = useState<QuickEditTarget>(null)
   const [typeSearch, setTypeSearch] = useState('')
   const [depenseSearch, setDepenseSearch] = useState('')
   const [recetteSearch, setRecetteSearch] = useState('')
+  const [expandedLineIndex, setExpandedLineIndex] = useState<number | null>(null)
+  const [lineCreateOpen, setLineCreateOpen] = useState(false)
+  const [lineBudgetCents, setLineBudgetCents] = useState<number | null>(null)
+  const [openCategoryNames, setOpenCategoryNames] = useState<string[]>([])
+  const [subCategoryPickerTarget, setSubCategoryPickerTarget] = useState<SubCategoryPickerTarget>(null)
+  const [subCategorySearch, setSubCategorySearch] = useState('')
   const amountInputRef = useRef<HTMLInputElement | null>(null)
-  const dateInputRef = useRef<HTMLInputElement | null>(null)
+  const quickAmountInputRef = useRef<HTMLInputElement | null>(null)
+  const createOptionsPanelRef = useRef<HTMLDivElement | null>(null)
+  const createLineCardRefs = useRef<Array<HTMLDivElement | null>>([])
+  const lineCardRefs = useRef<Array<HTMLDivElement | null>>([])
   const deferredSearch = useDeferredValue(search)
   const deferredTypeSearch = useDeferredValue(typeSearch)
   const deferredDepenseSearch = useDeferredValue(depenseSearch)
   const deferredRecetteSearch = useDeferredValue(recetteSearch)
+  const deferredTypeFilterSearch = useDeferredValue(typeFilterSearch)
+  const deferredSubCategorySearch = useDeferredValue(subCategorySearch)
 
   const operationsQuery = useQuery({
     queryKey: ['operations'],
@@ -226,6 +349,11 @@ export function OperationsPage() {
     queryFn: () => monatisApi.listTechnicalAccounts(),
   })
 
+  const categoriesQuery = useQuery({
+    queryKey: ['references', 'categorie'],
+    queryFn: () => monatisApi.listReferences('categorie'),
+  })
+
   const sousCategoriesQuery = useQuery({
     queryKey: ['references', 'souscategorie'],
     queryFn: () => monatisApi.listReferences('souscategorie'),
@@ -239,6 +367,10 @@ export function OperationsPage() {
   const createForm = useForm<CreateFormValues>({
     resolver: zodResolver(createSchema),
     defaultValues: CREATE_DEFAULTS,
+  })
+  const createLineFieldArray = useFieldArray({
+    control: createForm.control,
+    name: 'lignes',
   })
 
   const editForm = useForm<EditFormValues>({
@@ -255,6 +387,14 @@ export function OperationsPage() {
       lignes: [],
     },
   })
+  const newLineForm = useForm<OperationLineFormValues>({
+    resolver: zodResolver(operationLineSchema),
+    defaultValues: makeOperationLineValues(todayIso()),
+  })
+  const newCreateLineForm = useForm<OperationLineFormValues>({
+    resolver: zodResolver(operationLineSchema),
+    defaultValues: makeOperationLineValues(todayIso()),
+  })
 
   const lineFieldArray = useFieldArray({
     control: editForm.control,
@@ -270,8 +410,36 @@ export function OperationsPage() {
   const createDateValeur = useWatch({ control: createForm.control, name: 'dateValeur' }) ?? todayIso()
   const createNomSousCategorie = useWatch({ control: createForm.control, name: 'nomSousCategorie' }) ?? ''
   const createBeneficiaries = useWatch({ control: createForm.control, name: 'nomsBeneficiaires' }) ?? []
+  const watchedCreateLines = useWatch({ control: createForm.control, name: 'lignes' })
+  const createLines = useMemo(() => watchedCreateLines ?? [], [watchedCreateLines])
   const editType = useWatch({ control: editForm.control, name: 'codeTypeOperation' }) ?? ''
-  const watchedLines = useWatch({ control: editForm.control, name: 'lignes' }) ?? []
+  const watchedEditLines = useWatch({ control: editForm.control, name: 'lignes' })
+  const watchedLines = useMemo(() => watchedEditLines ?? [], [watchedEditLines])
+  const newLineBeneficiaries = useWatch({ control: newLineForm.control, name: 'nomsBeneficiaires' }) ?? []
+  const newLineSubCategory = useWatch({ control: newLineForm.control, name: 'nomSousCategorie' }) ?? ''
+  const newLineAmount = useWatch({ control: newLineForm.control, name: 'montant' }) ?? ''
+  const newCreateLineBeneficiaries = useWatch({ control: newCreateLineForm.control, name: 'nomsBeneficiaires' }) ?? []
+  const newCreateLineSubCategory = useWatch({ control: newCreateLineForm.control, name: 'nomSousCategorie' }) ?? ''
+  const newCreateLineAmount = useWatch({ control: newCreateLineForm.control, name: 'montant' }) ?? ''
+  const amountReady = Boolean(createAmount.trim())
+  const createLinePayloads = useMemo(() => buildOperationLinePayloads(createLines), [createLines])
+  const createEffectiveAmountCents = createLinePayloads.length ? sumOperationLinePayloads(createLinePayloads) : parseMoneyToCents(createAmount || '0')
+  const lineBaselines = useMemo(() => {
+    if (!detailQuery.data) {
+      return []
+    }
+
+    return detailQuery.data.lignes.map((line, index) =>
+      normalizeOperationLineValues({
+        numeroLigne: line.numeroLigne,
+        libelle: line.libelle ?? '',
+        dateComptabilisation: line.dateComptabilisation ?? detailQuery.data.dateValeur,
+        montant: toMoneyInput(line.montantEnCentimes),
+        nomSousCategorie: subCategoryNameForLine(line),
+        nomsBeneficiaires: beneficiariesForLine(detailQuery.data, index),
+      }),
+    )
+  }, [detailQuery.data])
 
   const compatQuery = useQuery({
     queryKey: ['operations', 'compat', createType],
@@ -290,6 +458,15 @@ export function OperationsPage() {
       return
     }
 
+    const mappedLines = detailQuery.data.lignes.map((line, index) => ({
+      numeroLigne: line.numeroLigne,
+      libelle: line.libelle ?? '',
+      dateComptabilisation: line.dateComptabilisation ?? detailQuery.data.dateValeur,
+      montant: toMoneyInput(line.montantEnCentimes),
+      nomSousCategorie: subCategoryNameForLine(line),
+      nomsBeneficiaires: beneficiariesForLine(detailQuery.data, index),
+    }))
+
     editForm.reset({
       numero: detailQuery.data.numero,
       libelle: detailQuery.data.libelle ?? '',
@@ -299,32 +476,71 @@ export function OperationsPage() {
       identifiantCompteDepense: depenseId(detailQuery.data),
       identifiantCompteRecette: recetteId(detailQuery.data),
       pointee: detailQuery.data.pointee,
-      lignes: detailQuery.data.lignes.map((line, index) => ({
-        numeroLigne: line.numeroLigne,
-        libelle: line.libelle ?? '',
-        dateComptabilisation: line.dateComptabilisation ?? detailQuery.data.dateValeur,
-        montant: toMoneyInput(line.montantEnCentimes),
-        nomSousCategorie: line.nomSousCategorie ?? line.sousCategorie?.nom ?? '',
-        nomsBeneficiaires: beneficiariesForLine(detailQuery.data, index),
-      })),
+      lignes: mappedLines,
     })
   }, [detailQuery.data, editForm])
 
   const technicalFallbackId = technicalAccountFallback(technicalAccountsQuery.data ?? [])
 
   useEffect(() => {
-    if (!createType) {
+    if (!createType || !compatQuery.data || !technicalFallbackId) {
       return
     }
 
-    if (compatQuery.data?.comptesCompatiblesDepense === null && createDepense !== technicalFallbackId) {
-      createForm.setValue('identifiantCompteDepense', technicalFallbackId)
+    if (createStep === 'depense' && compatQuery.data.comptesCompatiblesDepense === null) {
+      if (createDepense !== technicalFallbackId) {
+        createForm.setValue('identifiantCompteDepense', technicalFallbackId)
+      }
+
+      if (compatQuery.data.comptesCompatiblesRecette === null) {
+        if (createRecette !== technicalFallbackId) {
+          createForm.setValue('identifiantCompteRecette', technicalFallbackId)
+        }
+        window.requestAnimationFrame(() => setCreateStep('amount'))
+        return
+      }
+
+      window.requestAnimationFrame(() => setCreateStep('recette'))
+      return
     }
 
-    if (compatQuery.data?.comptesCompatiblesRecette === null && createRecette !== technicalFallbackId) {
-      createForm.setValue('identifiantCompteRecette', technicalFallbackId)
+    if (createStep === 'recette' && compatQuery.data.comptesCompatiblesRecette === null) {
+      if (createRecette !== technicalFallbackId) {
+        createForm.setValue('identifiantCompteRecette', technicalFallbackId)
+      }
+      window.requestAnimationFrame(() => setCreateStep('amount'))
     }
-  }, [compatQuery.data, createDepense, createForm, createRecette, createType, technicalFallbackId])
+  }, [compatQuery.data, createDepense, createForm, createRecette, createStep, createType, technicalFallbackId])
+
+  useEffect(() => {
+    if (!createType || !compatQuery.data || !technicalFallbackId || !quickEditTarget) {
+      return
+    }
+
+    if (quickEditTarget === 'depense' && compatQuery.data.comptesCompatiblesDepense === null) {
+      if (createDepense !== technicalFallbackId) {
+        createForm.setValue('identifiantCompteDepense', technicalFallbackId)
+      }
+
+      if (compatQuery.data.comptesCompatiblesRecette === null) {
+        if (createRecette !== technicalFallbackId) {
+          createForm.setValue('identifiantCompteRecette', technicalFallbackId)
+        }
+        window.requestAnimationFrame(() => setQuickEditTarget(amountReady ? null : 'amount'))
+        return
+      }
+
+      window.requestAnimationFrame(() => setQuickEditTarget('recette'))
+      return
+    }
+
+    if (quickEditTarget === 'recette' && compatQuery.data.comptesCompatiblesRecette === null) {
+      if (createRecette !== technicalFallbackId) {
+        createForm.setValue('identifiantCompteRecette', technicalFallbackId)
+      }
+      window.requestAnimationFrame(() => setQuickEditTarget(amountReady ? null : 'amount'))
+    }
+  }, [amountReady, compatQuery.data, createDepense, createForm, createRecette, createType, quickEditTarget, technicalFallbackId])
 
   useEffect(() => {
     if (!(location.state as { openCreate?: boolean } | null)?.openCreate) {
@@ -334,16 +550,25 @@ export function OperationsPage() {
     const frame = window.requestAnimationFrame(() => {
       createForm.reset(CREATE_DEFAULTS)
       setCreateStep('type')
-      setAdvancedOpen(false)
+      setCreateOptionsOpen(false)
+      setExpandedCreateLineIndex(null)
+      setCreateLineCreateOpen(false)
+      setCreateLineBaselines([])
+      setQuickEditTarget(null)
       setTypeSearch('')
       setDepenseSearch('')
       setRecetteSearch('')
+      setTypeFilterSearch('')
+      setOpenCategoryNames([])
+      setSubCategoryPickerTarget(null)
+      setSubCategorySearch('')
+      newCreateLineForm.reset(makeOperationLineValues(todayIso()))
       setCreateOpen(true)
       navigate(location.pathname, { replace: true, state: null })
     })
 
     return () => window.cancelAnimationFrame(frame)
-  }, [createForm, location.pathname, location.state, navigate])
+  }, [createForm, location.pathname, location.state, navigate, newCreateLineForm])
 
   useEffect(() => {
     if (!createOpen || createStep !== 'amount') {
@@ -358,6 +583,64 @@ export function OperationsPage() {
     return () => window.cancelAnimationFrame(frame)
   }, [createOpen, createStep])
 
+  useEffect(() => {
+    if (quickEditTarget !== 'amount') {
+      return
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      quickAmountInputRef.current?.focus()
+      quickAmountInputRef.current?.select()
+    })
+
+    return () => window.cancelAnimationFrame(frame)
+  }, [quickEditTarget])
+
+  useEffect(() => {
+    if (!createOpen || createStep !== 'review' || !createOptionsOpen) {
+      return
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      createOptionsPanelRef.current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      })
+    })
+
+    return () => window.cancelAnimationFrame(frame)
+  }, [createOpen, createOptionsOpen, createStep])
+
+  useEffect(() => {
+    if (!createOpen || !createOptionsOpen || expandedCreateLineIndex == null) {
+      return
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      createLineCardRefs.current[expandedCreateLineIndex]?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      })
+    })
+
+    return () => window.cancelAnimationFrame(frame)
+  }, [createOpen, createOptionsOpen, expandedCreateLineIndex])
+
+  useEffect(() => {
+    if (detailTab !== 'lines' || expandedLineIndex == null) {
+      return
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      lineCardRefs.current[expandedLineIndex]?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      })
+    })
+
+    return () => window.cancelAnimationFrame(frame)
+  }, [detailTab, expandedLineIndex])
+
   const depenseOptions = useMemo(() => compatQuery.data?.comptesCompatiblesDepense ?? [], [compatQuery.data?.comptesCompatiblesDepense])
   const recetteOptions = useMemo(
     () => refinedRecetteQuery.data?.comptesCompatiblesRecette ?? compatQuery.data?.comptesCompatiblesRecette ?? [],
@@ -369,7 +652,7 @@ export function OperationsPage() {
     const items = sortOperationsDesc(operationsQuery.data ?? [])
 
     return items.filter((operation) => {
-      if (typeFilter !== 'TOUS' && operationTypeCode(operation) !== typeFilter) {
+      if (selectedTypeFilters.length && !selectedTypeFilters.includes(operationTypeCode(operation))) {
         return false
       }
 
@@ -381,7 +664,33 @@ export function OperationsPage() {
         .filter(Boolean)
         .some((value) => String(value).toLowerCase().includes(needle))
     })
-  }, [deferredSearch, operationsQuery.data, typeFilter])
+  }, [deferredSearch, operationsQuery.data, selectedTypeFilters])
+
+  const selectedOperationSummary = useMemo(
+    () => (operationsQuery.data ?? []).find((operation) => operation.numero === selectedNumero) ?? null,
+    [operationsQuery.data, selectedNumero],
+  )
+  const createDefinedAmountCents = parseMoneyToCents(createAmount || '0')
+  const createLineErrors = useMemo(
+    () => createLines.map((_, index) => amountLimitMessage(createDefinedAmountCents, createLines, index)),
+    [createDefinedAmountCents, createLines],
+  )
+  const hasCreateLineOverflow = createLineErrors.some(Boolean)
+  const hasCreateLineDrafts = createLines.some((line, index) => !operationLineValuesEqual(line, createLineBaselines[index]))
+  const currentLineBudgetCents = lineBudgetCents ?? selectedOperationSummary?.montantEnCentimes ?? detailQuery.data?.montantEnCentimes ?? 0
+  const detailLineErrors = useMemo(
+    () => watchedLines.map((_, index) => amountLimitMessage(currentLineBudgetCents, watchedLines, index)),
+    [currentLineBudgetCents, watchedLines],
+  )
+  const hasDetailLineOverflow = detailLineErrors.some(Boolean)
+  const newLineAmountError = useMemo(
+    () => amountLimitMessageForNewLine(currentLineBudgetCents, watchedLines, newLineAmount),
+    [currentLineBudgetCents, newLineAmount, watchedLines],
+  )
+  const newCreateLineAmountError = useMemo(
+    () => amountLimitMessageForNewLine(createDefinedAmountCents, createLines, newCreateLineAmount),
+    [createDefinedAmountCents, createLines, newCreateLineAmount],
+  )
 
   const allAccounts = useMemo(
     () => [
@@ -422,6 +731,23 @@ export function OperationsPage() {
     [filteredOperationTypes],
   )
 
+  const filteredFilterOperationTypes = useMemo(
+    () =>
+      sortedOperationTypes.filter((type) =>
+        matchesNeedle(`${type.code} ${type.libelleCourt} ${type.libelle}`, deferredTypeFilterSearch),
+      ),
+    [deferredTypeFilterSearch, sortedOperationTypes],
+  )
+
+  const groupedFilterOperationTypes = useMemo(
+    () =>
+      OPERATION_TYPE_GROUP_META.map((group) => ({
+        ...group,
+        items: filteredFilterOperationTypes.filter((type) => operationTypeGroup(type.code) === group.key),
+      })).filter((group) => group.items.length),
+    [filteredFilterOperationTypes],
+  )
+
   const filteredDepenseOptions = useMemo(
     () => depenseOptions.filter((account) => matchesNeedle(accountChoiceLabel(account), deferredDepenseSearch)),
     [deferredDepenseSearch, depenseOptions],
@@ -436,48 +762,121 @@ export function OperationsPage() {
     () => (typesQuery.data ?? []).find((type) => type.code === createType) ?? null,
     [createType, typesQuery.data],
   )
+  const selectedTypeFilterItems = useMemo(
+    () => sortedOperationTypes.filter((type) => selectedTypeFilters.includes(type.code)),
+    [selectedTypeFilters, sortedOperationTypes],
+  )
   const createFlowLabels = useMemo(() => flowLabelsForType(createType), [createType])
   const editFlowLabels = useMemo(
     () => flowLabelsForType(editType || detailQuery.data?.typeOperation?.code || detailQuery.data?.codeTypeOperation || ''),
     [detailQuery.data?.codeTypeOperation, detailQuery.data?.typeOperation?.code, editType],
   )
+  const detailReferenceSummary = useMemo(() => {
+    if (!detailQuery.data) {
+      return {
+        subCategories: [] as string[],
+        beneficiaries: [] as string[],
+      }
+    }
+
+    const subCategories = Array.from(new Set(detailQuery.data.lignes.map((line) => subCategoryNameForLine(line)).filter(Boolean)))
+    const beneficiaries = Array.from(new Set(detailQuery.data.lignes.flatMap((line) => beneficiaryNamesForDisplay(line)).filter(Boolean)))
+
+    return { subCategories, beneficiaries }
+  }, [detailQuery.data])
+
+  const categoriesByName = useMemo(() => {
+    const categories = categoriesQuery.data ?? []
+    const sousCategories = sousCategoriesQuery.data ?? []
+    const map = new Map<string, ReferenceListItem[]>()
+
+    categories.forEach((category) => {
+      map.set(category.nom, [])
+    })
+
+    sousCategories.forEach((item) => {
+      const categoryName = item.nomCategorie ?? 'Sans categorie'
+      map.set(categoryName, [...(map.get(categoryName) ?? []), item])
+    })
+
+    return Array.from(map.entries()).map(([name, items]) => ({
+      name,
+      items: [...items].sort((left, right) => left.nom.localeCompare(right.nom)),
+    }))
+  }, [categoriesQuery.data, sousCategoriesQuery.data])
+
+  const filteredSubCategories = useMemo(
+    () =>
+      (sousCategoriesQuery.data ?? []).filter((item) =>
+        matchesNeedle(`${item.nom} ${item.nomCategorie ?? ''} ${item.libelle ?? ''}`, deferredSubCategorySearch),
+      ),
+    [deferredSubCategorySearch, sousCategoriesQuery.data],
+  )
 
   const createMutation = useMutation({
-    mutationFn: (values: CreateFormValues) =>
-      monatisApi.createOperation({
+    mutationFn: (values: CreateFormValues) => {
+      const lines = buildOperationLinePayloads(values.lignes ?? [])
+      const montantEnCentimes = lines.length ? sumOperationLinePayloads(lines) : parseMoneyToCents(values.montant)
+
+      return monatisApi.createOperation({
         numero: nullIfBlank(values.numero ?? ''),
         libelle: nullIfBlank(values.libelle ?? ''),
         codeTypeOperation: values.codeTypeOperation,
         dateValeur: nullIfBlank(values.dateValeur ?? ''),
-        montantEnCentimes: parseMoneyToCents(values.montant),
+        montantEnCentimes,
         identifiantCompteDepense: values.identifiantCompteDepense?.trim() || technicalFallbackId,
         identifiantCompteRecette: values.identifiantCompteRecette?.trim() || technicalFallbackId,
         nomSousCategorie: nullIfBlank(values.nomSousCategorie ?? ''),
         nomsBeneficiaires: values.nomsBeneficiaires,
-      }),
-    onSuccess: async (response) => {
+      })
+    },
+    onSuccess: async (response, values) => {
+      const lines = buildOperationLinePayloads(values.lignes ?? []).map((line) => ({
+        ...line,
+        numeroLigne: null,
+      }))
+
+      if (lines.length) {
+        await monatisApi.updateOperation(response.numero, {
+          numero: null,
+          libelle: null,
+          codeTypeOperation: null,
+          dateValeur: null,
+          montantEnCentimes: sumOperationLinePayloads(lines),
+          identifiantCompteDepense: null,
+          identifiantCompteRecette: null,
+          pointee: null,
+          lignes: lines.map((line) => ({
+            numeroLigne: line.numeroLigne,
+            libelle: line.libelle,
+            dateComptabilisation: line.dateComptabilisation,
+            montantEnCentimes: line.montantEnCentimes,
+            nomSousCategorie: line.nomSousCategorie,
+            nomsBeneficiaires: line.nomsBeneficiaires,
+          })),
+        })
+      }
+
       await queryClient.invalidateQueries({ queryKey: ['operations'] })
-      setSelectedNumero(response.numero)
+      setSelectedNumero(null)
+      setDetailTab('overview')
+      setExpandedLineIndex(null)
+      setExpandedOverviewLineIndex(null)
+      resetCreateFlow()
     },
   })
 
   const updateMutation = useMutation({
     mutationFn: async (values: EditFormValues) => {
-      const lignes: OperationLinePayload[] = values.lignes.map((line) => ({
-        numeroLigne: line.numeroLigne,
-        libelle: nullIfBlank(line.libelle ?? ''),
-        dateComptabilisation: nullIfBlank(line.dateComptabilisation ?? ''),
-        montantEnCentimes: line.montant ? parseMoneyToCents(line.montant) : null,
-        nomSousCategorie: nullIfBlank(line.nomSousCategorie ?? ''),
-        nomsBeneficiaires: line.nomsBeneficiaires,
-      }))
+      const lignes = buildOperationLinePayloads(values.lignes ?? [])
+      const montantEnCentimes = lignes.length ? sumOperationLinePayloads(lignes) : values.montant ? parseMoneyToCents(values.montant) : null
 
       return monatisApi.updateOperation(selectedNumero!, {
         numero: nullIfBlank(values.numero ?? ''),
         libelle: nullIfBlank(values.libelle ?? ''),
         codeTypeOperation: nullIfBlank(values.codeTypeOperation ?? ''),
         dateValeur: nullIfBlank(values.dateValeur ?? ''),
-        montantEnCentimes: values.montant ? parseMoneyToCents(values.montant) : null,
+        montantEnCentimes,
         identifiantCompteDepense: nullIfBlank(values.identifiantCompteDepense ?? ''),
         identifiantCompteRecette: nullIfBlank(values.identifiantCompteRecette ?? ''),
         pointee: values.pointee,
@@ -494,7 +893,11 @@ export function OperationsPage() {
     mutationFn: () => monatisApi.deleteOperation(selectedNumero!),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['operations'] })
+      setLineBudgetCents(null)
       setSelectedNumero(null)
+      setDetailTab('overview')
+      setExpandedLineIndex(null)
+      setExpandedOverviewLineIndex(null)
       editForm.reset({
         numero: '',
         libelle: '',
@@ -516,6 +919,7 @@ export function OperationsPage() {
     internalAccountsQuery.error ||
     externalAccountsQuery.error ||
     technicalAccountsQuery.error ||
+    categoriesQuery.error ||
     sousCategoriesQuery.error ||
     beneficiairesQuery.error ||
     compatQuery.error ||
@@ -524,24 +928,35 @@ export function OperationsPage() {
     updateMutation.error ||
     deleteMutation.error
 
-  const currentTypeNeedsReference = ['RECETTE', 'DEPENSE'].includes(createType)
+  const currentTypeNeedsReference = ['RECETTE', 'DEPENSE', 'ACHAT', 'VENTE'].includes(createType)
   const depenseIsTechnical = compatQuery.data?.comptesCompatiblesDepense === null
   const recetteIsTechnical = compatQuery.data?.comptesCompatiblesRecette === null
-  const amountReady = Boolean(createAmount.trim())
   const depenseReady = depenseIsTechnical ? Boolean(technicalFallbackId) : Boolean(createDepense)
   const recetteReady = recetteIsTechnical ? Boolean(technicalFallbackId) : Boolean(createRecette)
+  const createReady = Boolean(createType) && amountReady && depenseReady && recetteReady
 
   function resetCreateFlow() {
     createForm.reset(CREATE_DEFAULTS)
     setCreateStep('type')
-    setAdvancedOpen(false)
+    setCreateOptionsOpen(false)
+    setExpandedCreateLineIndex(null)
+    setCreateLineCreateOpen(false)
+    setCreateLineBaselines([])
+    setQuickEditTarget(null)
     setTypeSearch('')
     setDepenseSearch('')
     setRecetteSearch('')
+    setTypeFilterSearch('')
+    setOpenCategoryNames([])
+    setSubCategoryPickerTarget(null)
+    setSubCategorySearch('')
+    newCreateLineForm.reset(makeOperationLineValues(todayIso()))
   }
 
   function openCreateFlow() {
     resetCreateFlow()
+    setSelectedNumero(null)
+    setDetailTab('overview')
     setCreateOpen(true)
   }
 
@@ -550,49 +965,71 @@ export function OperationsPage() {
     setCreateOpen(false)
   }
 
+  function toggleCreateOptionsPanel() {
+    if (createOptionsOpen) {
+      if (expandedCreateLineIndex != null && createLineIsDirty(expandedCreateLineIndex)) {
+        resetCreateLineToBaseline(expandedCreateLineIndex)
+      }
+      setExpandedCreateLineIndex(null)
+      setCreateLineCreateOpen(false)
+      newCreateLineForm.reset(makeOperationLineValues(createForm.getValues('dateValeur') || todayIso()))
+      if (subCategoryPickerTarget?.kind === 'createLine' || subCategoryPickerTarget?.kind === 'newCreateLine') {
+        closeSubCategoryPicker()
+      }
+    }
+
+    setCreateOptionsOpen((current) => !current)
+  }
+
   function selectType(code: string) {
+    const keepReferences = ['RECETTE', 'DEPENSE', 'ACHAT', 'VENTE'].includes(code)
     createForm.reset({
       ...CREATE_DEFAULTS,
       dateValeur: createDateValeur || todayIso(),
+      numero: createNumero,
+      libelle: createLibelle,
+      montant: createAmount,
+      nomSousCategorie: keepReferences ? createNomSousCategorie : '',
+      nomsBeneficiaires: keepReferences ? createBeneficiaries : [],
       codeTypeOperation: code,
+      lignes: [],
     })
-    setAdvancedOpen(false)
+    setCreateOptionsOpen(false)
+    setExpandedCreateLineIndex(null)
+    setCreateLineCreateOpen(false)
+    setCreateLineBaselines([])
     setDepenseSearch('')
     setRecetteSearch('')
-    setCreateStep('amount')
+    setCreateStep('depense')
   }
 
-  function continueFromAmount() {
-    if (!amountReady || compatQuery.isLoading || !compatQuery.data) {
-      return
-    }
-
-    setAdvancedOpen(false)
-
-    if (depenseIsTechnical && technicalFallbackId) {
-      createForm.setValue('identifiantCompteDepense', technicalFallbackId)
-
-      if (recetteIsTechnical) {
-        createForm.setValue('identifiantCompteRecette', technicalFallbackId)
-        setCreateStep('review')
-        return
-      }
-
-      createForm.setValue('identifiantCompteRecette', '')
-      setCreateStep('recette')
-      return
-    }
-
-    createForm.setValue('identifiantCompteDepense', '')
-    createForm.setValue('identifiantCompteRecette', '')
-    setCreateStep('depense')
+  function selectTypeInQuickEditor(code: string) {
+    const keepReferences = ['RECETTE', 'DEPENSE', 'ACHAT', 'VENTE'].includes(code)
+    createForm.reset({
+      ...CREATE_DEFAULTS,
+      dateValeur: createDateValeur || todayIso(),
+      numero: createNumero,
+      libelle: createLibelle,
+      montant: createAmount,
+      nomSousCategorie: keepReferences ? createNomSousCategorie : '',
+      nomsBeneficiaires: keepReferences ? createBeneficiaries : [],
+      codeTypeOperation: code,
+      lignes: [],
+    })
+    setCreateOptionsOpen(false)
+    setExpandedCreateLineIndex(null)
+    setCreateLineCreateOpen(false)
+    setCreateLineBaselines([])
+    setDepenseSearch('')
+    setRecetteSearch('')
+    setQuickEditTarget('depense')
   }
 
   function selectDepenseAccount(identifiant: string) {
     createForm.setValue('identifiantCompteDepense', identifiant)
-    if (recetteIsTechnical) {
+    if (recetteIsTechnical && technicalFallbackId) {
       createForm.setValue('identifiantCompteRecette', technicalFallbackId)
-      setCreateStep('review')
+      setCreateStep('amount')
       return
     }
 
@@ -601,30 +1038,160 @@ export function OperationsPage() {
     setCreateStep('recette')
   }
 
-  function selectRecetteAccount(identifiant: string) {
-    createForm.setValue('identifiantCompteRecette', identifiant)
-    setCreateStep('review')
-  }
-
-  function goBack() {
-    setAdvancedOpen(false)
-
-    if (createStep === 'amount') {
-      setCreateStep('type')
+  function selectDepenseInQuickEditor(identifiant: string) {
+    createForm.setValue('identifiantCompteDepense', identifiant)
+    if (recetteIsTechnical && technicalFallbackId) {
+      createForm.setValue('identifiantCompteRecette', technicalFallbackId)
+      setQuickEditTarget(amountReady ? null : 'amount')
       return
     }
 
-    if (createStep === 'depense') {
+    createForm.setValue('identifiantCompteRecette', '')
+    setRecetteSearch('')
+    setQuickEditTarget('recette')
+  }
+
+  function selectRecetteAccount(identifiant: string) {
+    createForm.setValue('identifiantCompteRecette', identifiant)
+    setCreateStep('amount')
+  }
+
+  function selectRecetteInQuickEditor(identifiant: string) {
+    createForm.setValue('identifiantCompteRecette', identifiant)
+    setQuickEditTarget(amountReady ? null : 'amount')
+  }
+
+  function continueFromAmount() {
+    if (!amountReady) {
+      return
+    }
+
+    setCreateStep('review')
+  }
+
+  function closeDetailOverlay() {
+    setSelectedNumero(null)
+    setDetailTab('overview')
+    setExpandedLineIndex(null)
+    setExpandedOverviewLineIndex(null)
+    setLineCreateOpen(false)
+    setLineBudgetCents(null)
+    closeSubCategoryPicker()
+  }
+
+  function resetCreateLineToBaseline(index: number) {
+    const baseline = createLineBaselines[index]
+    if (!baseline) {
+      return
+    }
+
+    createForm.setValue(`lignes.${index}.numeroLigne`, baseline.numeroLigne)
+    createForm.setValue(`lignes.${index}.libelle`, baseline.libelle)
+    createForm.setValue(`lignes.${index}.dateComptabilisation`, baseline.dateComptabilisation)
+    createForm.setValue(`lignes.${index}.montant`, baseline.montant)
+    createForm.setValue(`lignes.${index}.nomSousCategorie`, baseline.nomSousCategorie)
+    createForm.setValue(`lignes.${index}.nomsBeneficiaires`, baseline.nomsBeneficiaires)
+  }
+
+  function createLineIsDirty(index: number): boolean {
+    return !operationLineValuesEqual(createLines[index], createLineBaselines[index])
+  }
+
+  function toggleCreateLine(index: number) {
+    setExpandedCreateLineIndex((current) => {
+      if (current === index) {
+        if (createLineIsDirty(index)) {
+          resetCreateLineToBaseline(index)
+        }
+        return null
+      }
+
+      if (current != null && createLineIsDirty(current)) {
+        resetCreateLineToBaseline(current)
+      }
+
+      return index
+    })
+  }
+
+  function openCreateLineCreatePanel() {
+    if (expandedCreateLineIndex != null && createLineIsDirty(expandedCreateLineIndex)) {
+      resetCreateLineToBaseline(expandedCreateLineIndex)
+    }
+    setExpandedCreateLineIndex(null)
+    newCreateLineForm.reset(makeOperationLineValues(createForm.getValues('dateValeur') || todayIso()))
+    setCreateLineCreateOpen(true)
+  }
+
+  function closeCreateLineCreatePanel() {
+    setExpandedCreateLineIndex(null)
+    setCreateLineCreateOpen(false)
+    newCreateLineForm.reset(makeOperationLineValues(createForm.getValues('dateValeur') || todayIso()))
+    if (subCategoryPickerTarget?.kind === 'newCreateLine') {
+      closeSubCategoryPicker()
+    }
+  }
+
+  function resetLineToBaseline(index: number) {
+    const baseline = lineBaselines[index]
+    if (!baseline) {
+      return
+    }
+
+    editForm.setValue(`lignes.${index}.numeroLigne`, baseline.numeroLigne)
+    editForm.setValue(`lignes.${index}.libelle`, baseline.libelle)
+    editForm.setValue(`lignes.${index}.dateComptabilisation`, baseline.dateComptabilisation)
+    editForm.setValue(`lignes.${index}.montant`, baseline.montant)
+    editForm.setValue(`lignes.${index}.nomSousCategorie`, baseline.nomSousCategorie)
+    editForm.setValue(`lignes.${index}.nomsBeneficiaires`, baseline.nomsBeneficiaires)
+  }
+
+  function lineIsDirty(index: number): boolean {
+    return !operationLineValuesEqual(watchedLines[index], lineBaselines[index])
+  }
+
+  function toggleDetailLine(index: number) {
+    setExpandedLineIndex((current) => {
+      if (current === index) {
+        if (lineIsDirty(index)) {
+          resetLineToBaseline(index)
+        }
+        return null
+      }
+
+      if (current != null && lineIsDirty(current)) {
+        resetLineToBaseline(current)
+      }
+
+      return index
+    })
+  }
+
+  function openLineCreatePanel() {
+    if (expandedLineIndex != null && lineIsDirty(expandedLineIndex)) {
+      resetLineToBaseline(expandedLineIndex)
+    }
+    setExpandedLineIndex(null)
+    newLineForm.reset(makeOperationLineValues(editForm.getValues('dateValeur') || todayIso()))
+    setLineCreateOpen(true)
+  }
+
+  function closeLineCreatePanel() {
+    setExpandedLineIndex(null)
+    setLineCreateOpen(false)
+    newLineForm.reset(makeOperationLineValues(editForm.getValues('dateValeur') || todayIso()))
+    if (subCategoryPickerTarget?.kind === 'newLine') {
+      closeSubCategoryPicker()
+    }
+  }
+
+  function goBack() {
+    if (createStep === 'review') {
       setCreateStep('amount')
       return
     }
 
-    if (createStep === 'recette') {
-      setCreateStep(depenseIsTechnical ? 'amount' : 'depense')
-      return
-    }
-
-    if (createStep === 'review') {
+    if (createStep === 'amount') {
       if (!recetteIsTechnical) {
         setCreateStep('recette')
         return
@@ -635,44 +1202,164 @@ export function OperationsPage() {
         return
       }
 
-      setCreateStep('amount')
+      setCreateStep('type')
+      return
     }
+
+    if (createStep === 'depense') {
+      setCreateStep('type')
+      return
+    }
+
+    if (createStep === 'recette') {
+      setCreateStep(depenseIsTechnical ? 'type' : 'depense')
+      return
+    }
+  }
+
+  function jumpToStep(step: CreateStep) {
+    if (step === 'review' && createReady) {
+      setCreateStep('review')
+      return
+    }
+
+    if (step === 'amount' && depenseReady && recetteReady) {
+      setCreateStep('amount')
+      return
+    }
+
+    if (step === 'recette' && depenseReady) {
+      setCreateStep('recette')
+      return
+    }
+
+    if (step === 'depense' && createType) {
+      setCreateStep('depense')
+      return
+    }
+
+    setCreateStep('type')
+  }
+
+  function toggleCategoryAccordion(name: string) {
+    setOpenCategoryNames((current) => {
+      if (current.includes(name)) {
+        return current.filter((item) => item !== name)
+      }
+
+      const next = [...current.filter((item) => item !== name), name]
+      return next.slice(-2)
+    })
+  }
+
+  function toggleTypeFilter(code: string) {
+    setSelectedTypeFilters((current) => (current.includes(code) ? current.filter((value) => value !== code) : [...current, code]))
+  }
+
+  function clearTypeFilters() {
+    setSelectedTypeFilters([])
+  }
+
+  function openSubCategoryPicker(target: Exclude<SubCategoryPickerTarget, null>) {
+    setSubCategoryPickerTarget(target)
+    setSubCategorySearch('')
+    setOpenCategoryNames([])
+  }
+
+  function closeSubCategoryPicker() {
+    setSubCategoryPickerTarget(null)
+    setSubCategorySearch('')
+    setOpenCategoryNames([])
+  }
+
+  function currentSubCategoryValue(): string {
+    if (!subCategoryPickerTarget) {
+      return ''
+    }
+
+    if (subCategoryPickerTarget.kind === 'create') {
+      return createForm.getValues('nomSousCategorie') ?? ''
+    }
+
+    if (subCategoryPickerTarget.kind === 'createLine') {
+      return createForm.getValues(`lignes.${subCategoryPickerTarget.index}.nomSousCategorie`) ?? ''
+    }
+
+    if (subCategoryPickerTarget.kind === 'newCreateLine') {
+      return newCreateLineForm.getValues('nomSousCategorie') ?? ''
+    }
+
+    if (subCategoryPickerTarget.kind === 'newLine') {
+      return newLineForm.getValues('nomSousCategorie') ?? ''
+    }
+
+    return editForm.getValues(`lignes.${subCategoryPickerTarget.index}.nomSousCategorie`) ?? ''
+  }
+
+  function toggleSubCategory(name: string) {
+    const current = currentSubCategoryValue()
+    const nextValue = current === name ? '' : name
+
+    if (subCategoryPickerTarget?.kind === 'createLine') {
+      createForm.setValue(`lignes.${subCategoryPickerTarget.index}.nomSousCategorie`, nextValue)
+    } else if (subCategoryPickerTarget?.kind === 'newCreateLine') {
+      newCreateLineForm.setValue('nomSousCategorie', nextValue)
+    } else if (subCategoryPickerTarget?.kind === 'newLine') {
+      newLineForm.setValue('nomSousCategorie', nextValue)
+    } else if (subCategoryPickerTarget?.kind === 'line') {
+      editForm.setValue(`lignes.${subCategoryPickerTarget.index}.nomSousCategorie`, nextValue)
+    } else {
+      createForm.setValue('nomSousCategorie', nextValue)
+    }
+
+    closeSubCategoryPicker()
+  }
+
+  async function saveLineCollection(lines: OperationLineFormValues[]) {
+    const currentValues = editForm.getValues()
+    const normalizedLines = lines.map((line) => normalizeOperationLineValues(line))
+    const payloadLines = buildOperationLinePayloads(normalizedLines)
+    if (payloadLines.length) {
+      editForm.setValue('montant', toMoneyInput(sumOperationLinePayloads(payloadLines)))
+    }
+    await updateMutation.mutateAsync({
+      ...currentValues,
+      montant: payloadLines.length ? toMoneyInput(sumOperationLinePayloads(payloadLines)) : currentValues.montant,
+      lignes: normalizedLines,
+    })
   }
 
   const createTrail = useMemo(() => {
-    const items: string[] = []
+    const items: Array<{ key: CreateStep; label: string }> = []
 
     if (createType) {
-      items.push(selectedType?.libelleCourt ?? createType)
+      items.push({ key: 'type', label: selectedType?.libelleCourt ?? createType })
     }
 
-    if (createStep !== 'type' && createAmount) {
-      items.push(createAmount)
+    if ((createStep === 'recette' || createStep === 'amount' || createStep === 'review') && depenseReady) {
+      items.push({
+        key: 'depense',
+        label: selectedAccountLabel(allAccounts, createDepense || technicalFallbackId),
+      })
     }
 
-    if ((createStep === 'recette' || createStep === 'review') && depenseReady) {
-      items.push(selectedAccountLabel(allAccounts, createDepense || technicalFallbackId))
+    if ((createStep === 'amount' || createStep === 'review') && recetteReady) {
+      items.push({
+        key: 'recette',
+        label: selectedAccountLabel(allAccounts, createRecette || technicalFallbackId),
+      })
     }
 
-    if (createStep === 'review' && recetteReady) {
-      items.push(selectedAccountLabel(allAccounts, createRecette || technicalFallbackId))
+    if (createStep === 'review' && (createAmount || createLinePayloads.length)) {
+      items.push({
+        key: 'amount',
+        label: formatCurrencyFromCents(createEffectiveAmountCents),
+      })
     }
 
     return items
-  }, [allAccounts, createAmount, createDepense, createRecette, createStep, createType, depenseReady, recetteReady, selectedType, technicalFallbackId])
+  }, [allAccounts, createAmount, createDepense, createEffectiveAmountCents, createLinePayloads.length, createRecette, createStep, createType, depenseReady, recetteReady, selectedType, technicalFallbackId])
   const amountField = createForm.register('montant')
-  const dateField = createForm.register('dateValeur')
-
-  function openDateOptions() {
-    setAdvancedOpen(true)
-
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        dateInputRef.current?.focus()
-        ;(dateInputRef.current as (HTMLInputElement & { showPicker?: () => void }) | null)?.showPicker?.()
-      })
-    })
-  }
 
   return (
     <div className="page-stack">
@@ -702,10 +1389,10 @@ export function OperationsPage() {
 
                   {createTrail.length ? (
                     <div className="wizard-trail">
-                      {createTrail.map((item, index) => (
-                        <span key={`${item}-${index}`} className="wizard-trail-item">
-                          {item}
-                        </span>
+                      {createTrail.map((item) => (
+                        <button key={item.key} type="button" className="wizard-trail-item button-reset" onClick={() => jumpToStep(item.key)}>
+                          {item.label}
+                        </button>
                       ))}
                     </div>
                   ) : null}
@@ -761,36 +1448,6 @@ export function OperationsPage() {
               </section>
             ) : null}
 
-            {createStep === 'amount' ? (
-              <section className="wizard-step">
-                <div className="wizard-step-head">
-                  <h2>Montant</h2>
-                </div>
-                <div className="wizard-amount">
-                  <input
-                    {...amountField}
-                    ref={(node) => {
-                      amountField.ref(node)
-                      amountInputRef.current = node
-                    }}
-                    inputMode="decimal"
-                    placeholder="0.00"
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') {
-                        event.preventDefault()
-                        continueFromAmount()
-                      }
-                    }}
-                  />
-                </div>
-                <div className="wizard-inline-actions">
-                  <Button type="button" disabled={!amountReady || compatQuery.isLoading} onClick={continueFromAmount}>
-                    Suivant
-                  </Button>
-                </div>
-              </section>
-            ) : null}
-
             {createStep === 'depense' ? (
               <section className="wizard-step">
                 <div className="wizard-step-head">
@@ -832,6 +1489,36 @@ export function OperationsPage() {
                     )}
                   </>
                 )}
+              </section>
+            ) : null}
+
+            {createStep === 'amount' ? (
+              <section className="wizard-step">
+                <div className="wizard-step-head">
+                  <h2>Montant</h2>
+                </div>
+                <div className="wizard-amount">
+                  <input
+                    {...amountField}
+                    ref={(node) => {
+                      amountField.ref(node)
+                      amountInputRef.current = node
+                    }}
+                    inputMode="decimal"
+                    placeholder="0.00"
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault()
+                        continueFromAmount()
+                      }
+                    }}
+                  />
+                </div>
+                <div className="wizard-inline-actions">
+                  <Button type="button" disabled={!amountReady} onClick={continueFromAmount}>
+                    Suivant
+                  </Button>
+                </div>
               </section>
             ) : null}
 
@@ -886,134 +1573,434 @@ export function OperationsPage() {
                 </div>
 
                 <div className="wizard-summary">
-                  <div className="wizard-summary-card">
+                  <button type="button" className="wizard-summary-card editable" onClick={() => setQuickEditTarget('type')}>
                     <span>Type</span>
                     <strong>{selectedType?.libelleCourt ?? createType}</strong>
-                  </div>
-                  <div className="wizard-summary-card">
-                    <span>Montant</span>
-                    <strong>{formatCurrencyFromCents(parseMoneyToCents(createAmount))}</strong>
-                  </div>
-                  <div className="wizard-summary-card">
+                    <Pencil size={14} />
+                  </button>
+                  <button type="button" className="wizard-summary-card editable" onClick={() => setQuickEditTarget('depense')}>
                     <span>{createFlowLabels.depenseSummary}</span>
                     <strong>{selectedAccountLabel(allAccounts, createDepense || technicalFallbackId)}</strong>
-                  </div>
-                  <div className="wizard-summary-card">
+                    <Pencil size={14} />
+                  </button>
+                  <button type="button" className="wizard-summary-card editable" onClick={() => setQuickEditTarget('recette')}>
                     <span>{createFlowLabels.recetteSummary}</span>
                     <strong>{selectedAccountLabel(allAccounts, createRecette || technicalFallbackId)}</strong>
-                  </div>
-                </div>
-
-                <div className="wizard-inline-actions">
-                  <Button type="submit" disabled={createMutation.isPending}>
-                    <Save size={16} />
-                    Valider
-                  </Button>
-                  <Button type="button" tone="ghost" onClick={() => setAdvancedOpen((current) => !current)}>
-                    {advancedOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                    Options
-                  </Button>
-                  <button type="button" className="wizard-date-button" onClick={openDateOptions}>
-                    {formatShortDate(createDateValeur)}
+                    <Pencil size={14} />
+                  </button>
+                  <button type="button" className="wizard-summary-card editable" onClick={() => setQuickEditTarget('amount')}>
+                    <span>Montant</span>
+                    <strong>{formatCurrencyFromCents(createEffectiveAmountCents)}</strong>
+                    <Pencil size={14} />
                   </button>
                 </div>
 
-                {advancedOpen ? (
-                  <div className="wizard-advanced">
-                    <div className="form-grid three-columns">
-                      <FormField label="Date">
-                        <input
-                          type="date"
-                          {...dateField}
-                          ref={(node) => {
-                            dateField.ref(node)
-                            dateInputRef.current = node
-                          }}
-                        />
-                      </FormField>
+                <div className="form-grid three-columns">
+                  <FormField label="Date">
+                    <input type="date" {...createForm.register('dateValeur')} />
+                  </FormField>
 
+                  <FormField label="Libelle">
+                    <input {...createForm.register('libelle')} placeholder="Facultatif" />
+                  </FormField>
+
+                  {currentTypeNeedsReference ? (
+                    <FormField label="Sous-categorie">
+                      <button type="button" className="picker-field" onClick={() => openSubCategoryPicker({ kind: 'create' })}>
+                        <div className="picker-field-content">
+                          {createNomSousCategorie ? (
+                            <div className="picker-chip-list">
+                              <span className="picker-chip">{createNomSousCategorie}</span>
+                            </div>
+                          ) : (
+                            <span>Choisir</span>
+                          )}
+                        </div>
+                        <ChevronDown size={16} />
+                      </button>
+                    </FormField>
+                  ) : (
+                    <div />
+                  )}
+                </div>
+
+                {currentTypeNeedsReference ? (
+                  <div className="form-field">
+                    <span className="form-field-label">Beneficiaires</span>
+                    <div className="checkbox-grid">
+                      {(beneficiairesQuery.data ?? []).map((item) => {
+                        const checked = createBeneficiaries.includes(item.nom)
+                        return (
+                          <label key={item.nom} className={cx('toggle-chip', checked && 'checked')}>
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => {
+                                const values = createForm.getValues('nomsBeneficiaires')
+                                createForm.setValue(
+                                  'nomsBeneficiaires',
+                                  checked ? values.filter((value) => value !== item.nom) : [...values, item.nom],
+                                )
+                              }}
+                            />
+                            <span>{item.nom}</span>
+                          </label>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="button-row wizard-review-actions">
+                  <Button type="button" tone="ghost" onClick={toggleCreateOptionsPanel}>
+                    Options
+                    {createLines.length ? <Badge>{createLines.length}</Badge> : null}
+                  </Button>
+                  {!createOptionsOpen ? (
+                    <Button type="submit" disabled={createMutation.isPending || !createReady || hasCreateLineOverflow || hasCreateLineDrafts}>
+                      <Save size={16} />
+                      Valider
+                    </Button>
+                  ) : null}
+                </div>
+
+                {createOptionsOpen ? (
+                  <div className="wizard-advanced" ref={createOptionsPanelRef}>
+                    <div className="form-grid">
                       <FormField label="Numero">
                         <input {...createForm.register('numero')} placeholder="Facultatif" />
                       </FormField>
-
-                      <FormField label="Libelle">
-                        <input {...createForm.register('libelle')} placeholder="Facultatif" />
-                      </FormField>
                     </div>
 
-                    {currentTypeNeedsReference ? (
-                      <div className="page-stack">
-                        <FormField label="Sous-categorie">
-                          <select {...createForm.register('nomSousCategorie')}>
-                            <option value="">Aucune</option>
-                            {(sousCategoriesQuery.data ?? []).map((item) => (
-                              <option key={item.nom} value={item.nom}>
-                                {item.nom}
-                              </option>
-                            ))}
-                          </select>
-                        </FormField>
-
-                        <div className="form-field">
-                          <span className="form-field-label">Beneficiaires</span>
-                          <div className="checkbox-grid">
-                            {(beneficiairesQuery.data ?? []).map((item) => {
-                              const checked = createBeneficiaries.includes(item.nom)
-                              return (
-                                <label key={item.nom} className={cx('toggle-chip', checked && 'checked')}>
-                                  <input
-                                    type="checkbox"
-                                    checked={checked}
-                                    onChange={() => {
-                                      const values = createForm.getValues('nomsBeneficiaires')
-                                      createForm.setValue(
-                                        'nomsBeneficiaires',
-                                        checked ? values.filter((value) => value !== item.nom) : [...values, item.nom],
-                                      )
-                                    }}
-                                  />
-                                  <span>{item.nom}</span>
-                                </label>
-                              )
-                            })}
-                          </div>
+                    <div className="page-stack">
+                      <div className="section-header">
+                        <div>
+                          <h2>Lignes</h2>
                         </div>
+                        <Button type="button" tone="ghost" disabled={hasCreateLineOverflow} onClick={openCreateLineCreatePanel}>
+                          <Plus size={16} />
+                          Ajouter
+                        </Button>
                       </div>
-                    ) : null}
 
-                    {(createNumero || createLibelle || createNomSousCategorie || createBeneficiaries.length) ? (
-                      <div className="wizard-summary wizard-summary-compact">
-                        {createNumero ? (
-                          <div className="wizard-summary-card">
-                            <span>Numero</span>
-                            <strong>{createNumero}</strong>
-                          </div>
-                        ) : null}
-                        {createLibelle ? (
-                          <div className="wizard-summary-card">
-                            <span>Libelle</span>
-                            <strong>{createLibelle}</strong>
-                          </div>
-                        ) : null}
-                        {createNomSousCategorie ? (
-                          <div className="wizard-summary-card">
-                            <span>Sous-categorie</span>
-                            <strong>{createNomSousCategorie}</strong>
-                          </div>
-                        ) : null}
-                        {createBeneficiaries.length ? (
-                          <div className="wizard-summary-card">
-                            <span>Beneficiaires</span>
-                            <strong>{createBeneficiaries.join(', ')}</strong>
-                          </div>
-                        ) : null}
-                      </div>
-                    ) : null}
+                      {createLineFieldArray.fields.length ? (
+                        <div className="page-stack">
+                          {createLineFieldArray.fields.map((field, index) => {
+                            const currentLine = createLines[index]
+                            const currentBenefs = currentLine?.nomsBeneficiaires ?? []
+                            const lineDirty = createLineIsDirty(index)
+                            const lineAmountError = createLineErrors[index]
+                            const isOpen = expandedCreateLineIndex === index
+                            const lineTitle = currentLine?.libelle?.trim() || `Ligne ${index + 1}`
+                            const lineMeta = [
+                              currentLine?.dateComptabilisation ? formatDate(currentLine.dateComptabilisation) : null,
+                              currentLine?.montant?.trim() ? formatCurrencyFromCents(parseMoneyToCents(currentLine.montant)) : null,
+                              currentLine?.nomSousCategorie?.trim() || null,
+                            ]
+                              .filter(Boolean)
+                              .join(' · ')
+
+                            return (
+                              <div
+                                key={field.id}
+                                ref={(node) => {
+                                  createLineCardRefs.current[index] = node
+                                }}
+                              >
+                                <Surface className={cx('inline-panel', 'line-editor-card', isOpen && 'open')}>
+                                  <div className="line-editor-head">
+                                    <button type="button" className="line-editor-toggle" onClick={() => toggleCreateLine(index)}>
+                                      <div className="line-editor-copy">
+                                        <strong>{lineTitle}</strong>
+                                        <span>{lineMeta || 'Sans detail'}</span>
+                                      </div>
+                                      <ChevronDown size={16} />
+                                    </button>
+
+                                    <div className="line-editor-actions">
+                                      {currentLine?.nomSousCategorie ? <Badge>{currentLine.nomSousCategorie}</Badge> : null}
+                                      {currentBenefs.length ? <Badge>{`${currentBenefs.length} beneficiaire${currentBenefs.length > 1 ? 's' : ''}`}</Badge> : null}
+                                    </div>
+                                  </div>
+
+                                  {isOpen ? (
+                                    <div className="line-editor-body">
+                                      <div className="section-header">
+                                        <div>
+                                          <h2>Ligne {index + 1}</h2>
+                                          {currentLine?.nomSousCategorie || currentBenefs.length ? (
+                                            <div className="pill-list">
+                                              {currentLine?.nomSousCategorie ? <Badge>{currentLine.nomSousCategorie}</Badge> : null}
+                                              {currentBenefs.map((name) => (
+                                                <Badge key={`${field.id}-${name}`}>{name}</Badge>
+                                              ))}
+                                            </div>
+                                          ) : null}
+                                        </div>
+                                        <Button
+                                          type="button"
+                                          tone="danger"
+                                          onClick={() => {
+                                            createLineFieldArray.remove(index)
+                                            setCreateLineBaselines((current) => current.filter((_, lineIndex) => lineIndex !== index))
+                                            setExpandedCreateLineIndex((current) => {
+                                              if (current == null) return null
+                                              if (current === index) return null
+                                              return current > index ? current - 1 : current
+                                            })
+                                          }}
+                                        >
+                                          <Trash2 size={16} />
+                                          Retirer
+                                        </Button>
+                                      </div>
+
+                                      <div className="form-grid three-columns">
+                                        <FormField label="Libelle">
+                                          <input {...createForm.register(`lignes.${index}.libelle`)} />
+                                        </FormField>
+
+                                        <FormField label="Date">
+                                          <input type="date" {...createForm.register(`lignes.${index}.dateComptabilisation`)} />
+                                        </FormField>
+
+                                        <FormField label="Montant">
+                                          <div className="inline-amount-field">
+                                            <input {...createForm.register(`lignes.${index}.montant`)} inputMode="decimal" />
+                                            {lineAmountError ? <small className="inline-amount-error">{lineAmountError}</small> : null}
+                                          </div>
+                                        </FormField>
+
+                                        <FormField label="Sous-categorie">
+                                          <button type="button" className="picker-field" onClick={() => openSubCategoryPicker({ kind: 'createLine', index })}>
+                                            <div className="picker-field-content">
+                                              {currentLine?.nomSousCategorie ? (
+                                                <div className="picker-chip-list">
+                                                  <span className="picker-chip">{currentLine.nomSousCategorie}</span>
+                                                </div>
+                                              ) : (
+                                                <span>Choisir</span>
+                                              )}
+                                            </div>
+                                            <ChevronDown size={16} />
+                                          </button>
+                                        </FormField>
+
+                                        <div className="form-field full-span">
+                                          <span className="form-field-label">Beneficiaires</span>
+                                          <div className="checkbox-grid">
+                                            {(beneficiairesQuery.data ?? []).map((item) => {
+                                              const checked = currentBenefs.includes(item.nom)
+                                              return (
+                                                <label key={item.nom} className={cx('toggle-chip', checked && 'checked')}>
+                                                  <input
+                                                    type="checkbox"
+                                                    checked={checked}
+                                                    onChange={() => {
+                                                      const values = createForm.getValues(`lignes.${index}.nomsBeneficiaires`)
+                                                      createForm.setValue(
+                                                        `lignes.${index}.nomsBeneficiaires`,
+                                                        checked ? values.filter((value) => value !== item.nom) : [...values, item.nom],
+                                                      )
+                                                    }}
+                                                  />
+                                                  <span>{item.nom}</span>
+                                                </label>
+                                              )
+                                            })}
+                                          </div>
+                                        </div>
+                                      </div>
+
+                                      {lineDirty ? (
+                                        <div className="line-editor-footer">
+                                          <Button type="button" tone="ghost" onClick={() => resetCreateLineToBaseline(index)}>
+                                            Annuler
+                                          </Button>
+                                          <Button
+                                            type="button"
+                                            disabled={Boolean(lineAmountError)}
+                                            onClick={() => {
+                                              const nextValue = normalizeOperationLineValues(createForm.getValues(`lignes.${index}`))
+                                              setCreateLineBaselines((current) => current.map((line, lineIndex) => (lineIndex === index ? nextValue : line)))
+                                              setExpandedCreateLineIndex(null)
+                                            }}
+                                          >
+                                            <Save size={16} />
+                                            Modifier
+                                          </Button>
+                                        </div>
+                                      ) : null}
+                                    </div>
+                                  ) : null}
+                                </Surface>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="button-row line-editor-submit-row">
+                      <Button type="submit" disabled={createMutation.isPending || !createReady || hasCreateLineOverflow || hasCreateLineDrafts}>
+                        <Save size={16} />
+                        Valider
+                      </Button>
+                    </div>
                   </div>
                 ) : null}
               </section>
             ) : null}
               </form>
+
+              {quickEditTarget ? (
+                <div className="quick-edit-layer" role="dialog" aria-modal="true" aria-label="Modifier un choix">
+                  <button type="button" className="quick-edit-backdrop" aria-label="Fermer" onClick={() => setQuickEditTarget(null)} />
+                  <div className="quick-edit-card">
+                    <div className="quick-edit-head">
+                      <strong>
+                        {quickEditTarget === 'type'
+                          ? 'Type'
+                          : quickEditTarget === 'depense'
+                            ? createFlowLabels.depenseStep
+                            : quickEditTarget === 'recette'
+                              ? createFlowLabels.recetteStep
+                              : 'Montant'}
+                      </strong>
+                      <button type="button" className="wizard-close-button" onClick={() => setQuickEditTarget(null)} aria-label="Fermer">
+                        <X size={14} />
+                      </button>
+                    </div>
+
+                    {quickEditTarget === 'type' ? (
+                      <div className="page-stack">
+                        <label className="search-field search-field-thin">
+                          <Search size={14} />
+                          <input value={typeSearch} onChange={(event) => setTypeSearch(event.target.value)} placeholder="Chercher..." />
+                        </label>
+                        {groupedOperationTypes.map((group) => (
+                          <div key={group.key} className="wizard-choice-section">
+                            <span className="wizard-choice-section-label">{group.label}</span>
+                            <div className="wizard-choice-grid">
+                              {group.items.map((type) => (
+                                <button
+                                  key={type.code}
+                                  type="button"
+                                  className={cx('wizard-choice-card', createType === type.code && 'active')}
+                                  onClick={() => selectTypeInQuickEditor(type.code)}
+                                >
+                                  <div>
+                                    <strong>{type.libelleCourt}</strong>
+                                    <span>{type.code}</span>
+                                  </div>
+                                  {createType === type.code ? <Check size={16} /> : null}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+
+                    {quickEditTarget === 'depense' ? (
+                      compatQuery.isLoading ? (
+                        <LoadingState label="Chargement..." />
+                      ) : depenseIsTechnical ? (
+                        <div className="wizard-locked">
+                          <Badge>Technique</Badge>
+                          <strong>{technicalFallbackId}</strong>
+                        </div>
+                      ) : (
+                        <div className="page-stack">
+                          <label className="search-field search-field-thin">
+                            <Search size={14} />
+                            <input value={depenseSearch} onChange={(event) => setDepenseSearch(event.target.value)} placeholder="Chercher..." />
+                          </label>
+                          <div className="wizard-choice-grid">
+                            {filteredDepenseOptions.map((account) => (
+                              <button
+                                key={account.identifiant}
+                                type="button"
+                                className={cx('wizard-choice-card', createDepense === account.identifiant && 'active')}
+                                onClick={() => selectDepenseInQuickEditor(account.identifiant)}
+                              >
+                                <div>
+                                  <strong>{account.identifiant}</strong>
+                                  <span>{account.libelle ?? ' '}</span>
+                                </div>
+                                {createDepense === account.identifiant ? <Check size={16} /> : null}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )
+                    ) : null}
+
+                    {quickEditTarget === 'recette' ? (
+                      refinedRecetteQuery.isLoading ? (
+                        <LoadingState label="Chargement..." />
+                      ) : recetteIsTechnical ? (
+                        <div className="wizard-locked">
+                          <Badge>Technique</Badge>
+                          <strong>{technicalFallbackId}</strong>
+                        </div>
+                      ) : (
+                        <div className="page-stack">
+                          <label className="search-field search-field-thin">
+                            <Search size={14} />
+                            <input value={recetteSearch} onChange={(event) => setRecetteSearch(event.target.value)} placeholder="Chercher..." />
+                          </label>
+                          <div className="wizard-choice-grid">
+                            {filteredRecetteOptions.map((account) => (
+                              <button
+                                key={account.identifiant}
+                                type="button"
+                                className={cx('wizard-choice-card', createRecette === account.identifiant && 'active')}
+                                onClick={() => selectRecetteInQuickEditor(account.identifiant)}
+                              >
+                                <div>
+                                  <strong>{account.identifiant}</strong>
+                                  <span>{account.libelle ?? ' '}</span>
+                                </div>
+                                {createRecette === account.identifiant ? <Check size={16} /> : null}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )
+                    ) : null}
+
+                    {quickEditTarget === 'amount' ? (
+                      <div className="page-stack">
+                        <div className="wizard-amount">
+                          <input
+                            {...amountField}
+                            ref={(node) => {
+                              amountField.ref(node)
+                              quickAmountInputRef.current = node
+                            }}
+                            inputMode="decimal"
+                            placeholder="0.00"
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') {
+                                event.preventDefault()
+                                if (createAmount.trim()) {
+                                  setQuickEditTarget(null)
+                                }
+                              }
+                            }}
+                          />
+                        </div>
+                        <div className="button-row">
+                          <Button type="button" disabled={!createAmount.trim()} onClick={() => setQuickEditTarget(null)}>
+                            Enregistrer
+                          </Button>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
             </Surface>
           </div>
         </div>
@@ -1023,78 +2010,512 @@ export function OperationsPage() {
         {operationsQuery.isLoading ? <LoadingState label="Chargement des operations..." /> : null}
         {hasError ? <ErrorState message={apiErrorMessage(hasError)} /> : null}
 
-        <div className="split-layout split-layout-wide">
-        <DataPanel title="Historique">
+        <Surface className="catalog-panel">
           <FilterBar>
             <label className="search-field">
               <Search size={16} />
               <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Chercher une operation..." />
             </label>
-            <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
-              <option value="TOUS">Tous les types</option>
-              {(typesQuery.data ?? []).map((type) => (
-                <option key={type.code} value={type.code}>
-                  {type.libelleCourt}
-                </option>
-              ))}
-            </select>
+
+            <button type="button" className="picker-field picker-field-compact" onClick={() => setTypeFilterPickerOpen(true)}>
+              <div className="picker-field-content">
+                {selectedTypeFilterItems.length ? (
+                  <div className="picker-chip-list">
+                    {selectedTypeFilterItems.slice(0, 3).map((type) => (
+                      <span key={type.code} className="picker-chip">
+                        {type.libelleCourt}
+                      </span>
+                    ))}
+                    {selectedTypeFilterItems.length > 3 ? <span className="picker-chip">+{selectedTypeFilterItems.length - 3}</span> : null}
+                  </div>
+                ) : (
+                  <span>Tous les types</span>
+                )}
+              </div>
+              <ChevronDown size={16} />
+            </button>
           </FilterBar>
 
           {!filteredOperations.length ? (
             <EmptyState title="Aucune operation visible" description="La liste est vide ou le filtre ne matche rien." />
           ) : (
-            <div className="list-stack">
+            <div className="catalog-grid catalog-grid-wide">
               {filteredOperations.map((operation) => (
-                <button key={operation.numero} className={`list-row ${selectedNumero === operation.numero ? 'selected' : ''}`} onClick={() => setSelectedNumero(operation.numero)}>
-                  <div>
-                    <strong>{readableOperationLabel(operation)}</strong>
-                    <p>
-                      {operation.numero} · {formatDate(operation.dateValeur)}
-                    </p>
+                <button
+                  key={operation.numero}
+                  type="button"
+                  className={cx('catalog-card', selectedNumero === operation.numero && 'selected')}
+                  onClick={() => {
+                    setLineBudgetCents(operation.montantEnCentimes)
+                    setSelectedNumero(operation.numero)
+                    setExpandedLineIndex(null)
+                    setExpandedOverviewLineIndex(null)
+                    setDetailTab('overview')
+                  }}
+                >
+                  <div className="catalog-card-head">
+                    <div>
+                      <strong>{readableOperationLabel(operation)}</strong>
+                      <p>{compactOperationMeta(operation)}</p>
+                    </div>
+                    <Badge>{operationTypeCode(operation)}</Badge>
                   </div>
-                  <Badge>{operationTypeCode(operation)}</Badge>
+
+                  <div className="catalog-meta-grid">
+                    <div className="catalog-meta-pair">
+                      <span>{flowLabelsForType(operationTypeCode(operation)).depenseSummary}</span>
+                      <strong>{selectedAccountLabel(allAccounts, depenseId(operation))}</strong>
+                    </div>
+                    <div className="catalog-meta-pair">
+                      <span>{flowLabelsForType(operationTypeCode(operation)).recetteSummary}</span>
+                      <strong>{selectedAccountLabel(allAccounts, recetteId(operation))}</strong>
+                    </div>
+                    <div className="catalog-meta-pair">
+                      <span>Montant</span>
+                      <strong>{formatCurrencyFromCents(operation.montantEnCentimes)}</strong>
+                    </div>
+                  </div>
                 </button>
               ))}
             </div>
           )}
-        </DataPanel>
+        </Surface>
+      </div>
 
-        <Surface className="editor-panel">
-          <div className="editor-panel-header">
-            <div>
-              <span className="eyebrow">Edition</span>
-              <h2>{selectedNumero ? `Operation ${selectedNumero}` : 'Selectionne une operation'}</h2>
-            </div>
-            {selectedNumero ? (
-              <Button
-                tone="danger"
-                onClick={() => {
-                  if (window.confirm(`Supprimer l operation ${selectedNumero} ?`)) {
-                    void deleteMutation.mutateAsync()
-                  }
-                }}
-              >
-                <Trash2 size={16} />
-                Supprimer
-              </Button>
-            ) : null}
+      <OverlayPanel
+        open={typeFilterPickerOpen}
+        onClose={() => setTypeFilterPickerOpen(false)}
+        title="Filtrer les types"
+        width="regular"
+        overlayClassName="overlay-top"
+      >
+        <div className="page-stack">
+          <label className="search-field search-field-thin">
+            <Search size={14} />
+            <input value={typeFilterSearch} onChange={(event) => setTypeFilterSearch(event.target.value)} placeholder="Chercher un type..." />
+          </label>
+
+          <div className="button-row">
+            <Button type="button" tone="ghost" onClick={clearTypeFilters}>
+              Tout afficher
+            </Button>
           </div>
 
-          {!selectedNumero ? (
-            <EmptyState title="Aucune operation selectionnee" description="Choisis une ligne dans l historique." />
-          ) : detailQuery.isLoading ? (
-            <LoadingState label="Chargement du detail..." />
+          {!groupedFilterOperationTypes.length ? (
+            <EmptyState title="Aucun type" description="Aucun type ne correspond a la recherche." />
           ) : (
-            <form
-              className="page-stack"
-              onSubmit={editForm.handleSubmit(async (values) => {
-                await updateMutation.mutateAsync(values)
+            groupedFilterOperationTypes.map((group) => (
+              <div key={group.key} className="wizard-choice-section">
+                <span className="wizard-choice-section-label">{group.label}</span>
+                <div className="wizard-choice-grid">
+                  {group.items.map((type) => {
+                    const active = selectedTypeFilters.includes(type.code)
+                    return (
+                      <button key={type.code} type="button" className={cx('wizard-choice-card', active && 'active')} onClick={() => toggleTypeFilter(type.code)}>
+                        <div>
+                          <strong>{type.libelleCourt}</strong>
+                          <span>{type.code}</span>
+                        </div>
+                        {active ? <Check size={16} /> : null}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </OverlayPanel>
+
+      <OverlayPanel open={Boolean(subCategoryPickerTarget)} onClose={closeSubCategoryPicker} title="Sous-categories" width="regular" overlayClassName="overlay-super-top">
+        <div className="page-stack">
+          <label className="search-field search-field-thin">
+            <Search size={14} />
+            <input value={subCategorySearch} onChange={(event) => setSubCategorySearch(event.target.value)} placeholder="Chercher une sous-categorie..." />
+          </label>
+
+          {deferredSubCategorySearch ? (
+            !filteredSubCategories.length ? (
+              <EmptyState title="Aucune sous-categorie" description="Aucun resultat pour cette recherche." />
+            ) : (
+              <div className="picker-option-list">
+                {filteredSubCategories.map((item) => {
+                  const selected = currentSubCategoryValue() === item.nom
+                  return (
+                    <button key={item.nom} type="button" className={cx('picker-option', selected && 'selected')} onClick={() => toggleSubCategory(item.nom)}>
+                      <div>
+                        <strong>{item.nom}</strong>
+                        <span>{item.nomCategorie ?? 'Sans categorie'}</span>
+                      </div>
+                      {selected ? <Check size={16} /> : null}
+                    </button>
+                  )
+                })}
+              </div>
+            )
+          ) : (
+            <div className="sub-category-groups">
+              {categoriesByName.map((category) => {
+                const open = openCategoryNames.includes(category.name)
+                return (
+                  <div key={category.name} className={cx('sub-category-group', open && 'open')}>
+                    <button type="button" className="sub-category-group-toggle" onClick={() => toggleCategoryAccordion(category.name)}>
+                      <span>{category.name}</span>
+                      <ChevronDown size={14} />
+                    </button>
+
+                    {open ? (
+                      <div className="sub-category-options">
+                        {category.items.length ? (
+                          category.items.map((item) => {
+                            const selected = currentSubCategoryValue() === item.nom
+                            return (
+                              <button key={item.nom} type="button" className={cx('sub-category-option', selected && 'selected')} onClick={() => toggleSubCategory(item.nom)}>
+                                <span>{item.nom}</span>
+                                {selected ? <Check size={14} /> : null}
+                              </button>
+                            )
+                          })
+                        ) : (
+                          <div className="sub-category-empty">Aucune sous-categorie</div>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+                )
               })}
+            </div>
+          )}
+        </div>
+      </OverlayPanel>
+
+      <OverlayPanel open={createLineCreateOpen} onClose={closeCreateLineCreatePanel} title="Nouvelle ligne" width="regular" overlayClassName="overlay-top">
+        <form
+          className="page-stack"
+          onSubmit={newCreateLineForm.handleSubmit(async (values) => {
+            createLineFieldArray.append(values)
+            setCreateLineBaselines((current) => [...current, normalizeOperationLineValues(values)])
+            closeCreateLineCreatePanel()
+          })}
+        >
+          <div className="form-grid three-columns">
+            <FormField label="Libelle">
+              <input {...newCreateLineForm.register('libelle')} />
+            </FormField>
+
+            <FormField label="Date">
+              <input type="date" {...newCreateLineForm.register('dateComptabilisation')} />
+            </FormField>
+
+            <FormField label="Montant">
+              <div className="inline-amount-field">
+                <input {...newCreateLineForm.register('montant')} inputMode="decimal" />
+                {newCreateLineAmountError ? <small className="inline-amount-error">{newCreateLineAmountError}</small> : null}
+              </div>
+            </FormField>
+
+            <FormField label="Sous-categorie">
+              <button type="button" className="picker-field" onClick={() => openSubCategoryPicker({ kind: 'newCreateLine' })}>
+                <div className="picker-field-content">
+                  {newCreateLineSubCategory ? (
+                    <div className="picker-chip-list">
+                      <span className="picker-chip">{newCreateLineSubCategory}</span>
+                    </div>
+                  ) : (
+                    <span>Choisir</span>
+                  )}
+                </div>
+                <ChevronDown size={16} />
+              </button>
+            </FormField>
+
+            <div className="form-field full-span">
+              <span className="form-field-label">Beneficiaires</span>
+              <div className="checkbox-grid">
+                {(beneficiairesQuery.data ?? []).map((item) => {
+                  const checked = newCreateLineBeneficiaries.includes(item.nom)
+                  return (
+                    <label key={item.nom} className={cx('toggle-chip', checked && 'checked')}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => {
+                          const values = newCreateLineForm.getValues('nomsBeneficiaires')
+                          newCreateLineForm.setValue(
+                            'nomsBeneficiaires',
+                            checked ? values.filter((value) => value !== item.nom) : [...values, item.nom],
+                          )
+                        }}
+                      />
+                      <span>{item.nom}</span>
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+
+          <div className="line-editor-footer">
+            <Button type="button" tone="ghost" onClick={closeCreateLineCreatePanel}>
+              Annuler
+            </Button>
+            <Button type="submit" disabled={Boolean(newCreateLineAmountError)}>
+              <Save size={16} />
+              Valider
+            </Button>
+          </div>
+        </form>
+      </OverlayPanel>
+
+      <OverlayPanel open={lineCreateOpen} onClose={closeLineCreatePanel} title="Nouvelle ligne" width="regular" overlayClassName="overlay-top">
+        <form
+          className="page-stack"
+          onSubmit={newLineForm.handleSubmit(async (values) => {
+            await saveLineCollection([...editForm.getValues('lignes'), values])
+            closeLineCreatePanel()
+            setDetailTab('lines')
+            setExpandedLineIndex(null)
+          })}
+        >
+          <div className="form-grid three-columns">
+            <FormField label="Libelle">
+              <input {...newLineForm.register('libelle')} />
+            </FormField>
+
+            <FormField label="Date">
+              <input type="date" {...newLineForm.register('dateComptabilisation')} />
+            </FormField>
+
+            <FormField label="Montant">
+              <div className="inline-amount-field">
+                <input {...newLineForm.register('montant')} inputMode="decimal" />
+                {newLineAmountError ? <small className="inline-amount-error">{newLineAmountError}</small> : null}
+              </div>
+            </FormField>
+
+            <FormField label="Sous-categorie">
+              <button type="button" className="picker-field" onClick={() => openSubCategoryPicker({ kind: 'newLine' })}>
+                <div className="picker-field-content">
+                  {newLineSubCategory ? (
+                    <div className="picker-chip-list">
+                      <span className="picker-chip">{newLineSubCategory}</span>
+                    </div>
+                  ) : (
+                    <span>Choisir</span>
+                  )}
+                </div>
+                <ChevronDown size={16} />
+              </button>
+            </FormField>
+
+            <div className="form-field full-span">
+              <span className="form-field-label">Beneficiaires</span>
+              <div className="checkbox-grid">
+                {(beneficiairesQuery.data ?? []).map((item) => {
+                  const checked = newLineBeneficiaries.includes(item.nom)
+                  return (
+                    <label key={item.nom} className={cx('toggle-chip', checked && 'checked')}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => {
+                          const values = newLineForm.getValues('nomsBeneficiaires')
+                          newLineForm.setValue(
+                            'nomsBeneficiaires',
+                            checked ? values.filter((value) => value !== item.nom) : [...values, item.nom],
+                          )
+                        }}
+                      />
+                      <span>{item.nom}</span>
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+
+          <div className="line-editor-footer">
+            <Button type="button" tone="ghost" onClick={closeLineCreatePanel}>
+              Annuler
+            </Button>
+            <Button type="submit" disabled={updateMutation.isPending || Boolean(newLineAmountError)}>
+              <Save size={16} />
+              Valider
+            </Button>
+          </div>
+        </form>
+      </OverlayPanel>
+
+      <OverlayPanel
+        open={Boolean(selectedNumero)}
+        onClose={closeDetailOverlay}
+        title={selectedOperationSummary ? readableOperationLabel(selectedOperationSummary) : 'Operation'}
+        subtitle={selectedOperationSummary ? compactOperationMeta(selectedOperationSummary) : undefined}
+        width="wide"
+        actions={
+          selectedNumero ? (
+            <Button
+              tone="danger"
+              onClick={() => {
+                if (window.confirm(`Supprimer l operation ${selectedNumero} ?`)) {
+                  void deleteMutation.mutateAsync()
+                }
+              }}
             >
-              <div className="form-grid three-columns">
-                <FormField label="Numero">
-                  <input {...editForm.register('numero')} />
-                </FormField>
+              <Trash2 size={16} />
+              Supprimer
+            </Button>
+          ) : null
+        }
+      >
+        {!selectedNumero ? null : detailQuery.isLoading ? (
+          <LoadingState label="Chargement du detail..." />
+        ) : !detailQuery.data ? (
+          <EmptyState title="Operation introuvable" description="Impossible d afficher le detail." />
+        ) : (
+          <>
+            <div className="modal-tabs">
+              <button type="button" className={cx('modal-tab-button', detailTab === 'overview' && 'active')} onClick={() => setDetailTab('overview')}>
+                Apercu
+              </button>
+              <button type="button" className={cx('modal-tab-button', detailTab === 'edit' && 'active')} onClick={() => setDetailTab('edit')}>
+                Modifier
+              </button>
+              <button
+                type="button"
+                className={cx('modal-tab-button', detailTab === 'lines' && 'active')}
+                onClick={() => {
+                  setDetailTab('lines')
+                  setExpandedLineIndex(null)
+                }}
+              >
+                Lignes
+              </button>
+            </div>
+
+            {detailTab === 'overview' ? (
+              <div className="page-stack">
+                <div className="operation-overview-grid">
+                  <div className="operation-overview-card">
+                    <span>Type</span>
+                    <strong>{detailQuery.data.typeOperation?.libelleCourt ?? operationTypeCode(detailQuery.data)}</strong>
+                  </div>
+                  <div className="operation-overview-card">
+                    <span>{editFlowLabels.depenseSummary}</span>
+                    <strong>{selectedAccountLabel(allAccounts, depenseId(detailQuery.data))}</strong>
+                  </div>
+                  <div className="operation-overview-card">
+                    <span>{editFlowLabels.recetteSummary}</span>
+                    <strong>{selectedAccountLabel(allAccounts, recetteId(detailQuery.data))}</strong>
+                  </div>
+                  <div className="operation-overview-card">
+                    <span>Montant</span>
+                    <strong>{formatCurrencyFromCents(detailQuery.data.montantEnCentimes)}</strong>
+                  </div>
+                  <div className="operation-overview-card compact">
+                    <span>Date</span>
+                    <strong>{formatDate(detailQuery.data.dateValeur)}</strong>
+                  </div>
+                  <div className="operation-overview-card compact">
+                    <span>Numero</span>
+                    <strong>{detailQuery.data.numero}</strong>
+                  </div>
+                  {detailQuery.data.libelle ? (
+                    <div className="operation-overview-card compact">
+                      <span>Libelle</span>
+                      <strong>{detailQuery.data.libelle}</strong>
+                    </div>
+                  ) : null}
+                  <div className="operation-overview-card compact">
+                    <span>Pointee</span>
+                    <strong>{detailQuery.data.pointee ? 'Oui' : 'Non'}</strong>
+                  </div>
+                  {detailReferenceSummary.subCategories.length ? (
+                    <div className="operation-overview-card compact wide">
+                      <span>Sous-categories</span>
+                      <div className="pill-list">
+                        {detailReferenceSummary.subCategories.map((item) => (
+                          <Badge key={item}>{item}</Badge>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  {detailReferenceSummary.beneficiaries.length ? (
+                    <div className="operation-overview-card compact wide">
+                      <span>Beneficiaires</span>
+                      <div className="pill-list">
+                        {detailReferenceSummary.beneficiaries.map((item) => (
+                          <Badge key={item}>{item}</Badge>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+
+                <Surface className="inline-panel operation-lines-panel">
+                  {!detailQuery.data.lignes.length ? (
+                    <EmptyState title="Aucune ligne" description="Cette operation ne contient pas encore de ligne detaillee." />
+                  ) : (
+                    <div className="operation-line-list">
+                      {detailQuery.data.lignes.map((line, index) => {
+                        const lineBeneficiaries = beneficiaryNamesForDisplay(line)
+                        const isOpen = expandedOverviewLineIndex === index
+                        return (
+                          <div key={line.numeroLigne} className={cx('operation-line-row', isOpen && 'open')}>
+                            <button
+                              type="button"
+                              className="operation-line-toggle"
+                              onClick={() => setExpandedOverviewLineIndex((current) => (current === index ? null : index))}
+                            >
+                              <div className="operation-line-main">
+                                <strong>{line.numeroLigne ?? index + 1}</strong>
+                                <span>{formatDate(line.dateComptabilisation)}</span>
+                                <span>{formatCurrencyFromCents(line.montantEnCentimes)}</span>
+                                <span>{subCategoryNameForLine(line) || 'Sans sous-categorie'}</span>
+                              </div>
+                              <ChevronDown size={14} />
+                            </button>
+
+                            {isOpen ? (
+                              <div className="operation-line-detail">
+                                {line.libelle ? (
+                                  <div className="operation-line-detail-row">
+                                    <span>Libelle</span>
+                                    <strong>{line.libelle}</strong>
+                                  </div>
+                                ) : null}
+                                {lineBeneficiaries.length ? (
+                                  <div className="operation-line-detail-row">
+                                    <span>Beneficiaires</span>
+                                    <div className="pill-list">
+                                      {lineBeneficiaries.map((name) => (
+                                        <Badge key={`${line.numeroLigne}-${name}`}>{name}</Badge>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ) : null}
+                              </div>
+                            ) : null}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </Surface>
+              </div>
+            ) : null}
+
+            {detailTab === 'edit' ? (
+              <form
+                className="page-stack"
+                onSubmit={editForm.handleSubmit(async (values) => {
+                  await updateMutation.mutateAsync(values)
+                })}
+              >
+                <div className="form-grid three-columns">
+                  <FormField label="Numero">
+                    <input {...editForm.register('numero')} />
+                  </FormField>
 
                   <FormField label="Type">
                     <select {...editForm.register('codeTypeOperation')}>
@@ -1137,120 +2558,204 @@ export function OperationsPage() {
                     </select>
                   </FormField>
 
-                <FormField label="Libelle">
-                  <textarea {...editForm.register('libelle')} rows={3} />
-                </FormField>
+                  <FormField label="Libelle">
+                    <textarea {...editForm.register('libelle')} rows={3} />
+                  </FormField>
 
-                <label className="toggle-inline">
-                  <input type="checkbox" {...editForm.register('pointee')} />
-                  <span>Operation pointee</span>
-                </label>
-              </div>
+                  <label className="toggle-inline">
+                    <input type="checkbox" {...editForm.register('pointee')} />
+                    <span>Operation pointee</span>
+                  </label>
+                </div>
 
-              <SectionHeader
-                title="Lignes de detail"
-                subtitle="Somme coherente avec le montant."
-                aside={
-                  <Button
-                    type="button"
-                    tone="ghost"
-                    onClick={() =>
-                      lineFieldArray.append({
-                        numeroLigne: null,
-                        libelle: '',
-                        dateComptabilisation: editForm.getValues('dateValeur') || todayIso(),
-                        montant: '',
-                        nomSousCategorie: '',
-                        nomsBeneficiaires: [],
-                      })
-                    }
-                  >
-                    <Plus size={16} />
-                    Ajouter une ligne
+                <div className="button-row">
+                  <Button type="submit" disabled={updateMutation.isPending}>
+                    <Save size={16} />
+                    Sauvegarder
                   </Button>
-                }
-              />
+                </div>
+              </form>
+            ) : null}
 
+            {detailTab === 'lines' ? (
               <div className="page-stack">
-                {lineFieldArray.fields.map((field, index) => {
-                  const currentBenefs = watchedLines[index]?.nomsBeneficiaires ?? []
-                  return (
-                    <Surface key={field.id} className="nested-panel">
-                      <div className="section-header">
-                        <div>
-                          <h2>Ligne {field.numeroLigne ?? 'nouvelle'}</h2>
-                        </div>
-                        <Button type="button" tone="danger" onClick={() => lineFieldArray.remove(index)}>
-                          <Trash2 size={16} />
-                          Retirer
-                        </Button>
-                      </div>
+                <SectionHeader
+                  title="Lignes de detail"
+                  aside={
+                    <Button type="button" tone="ghost" disabled={hasDetailLineOverflow} onClick={openLineCreatePanel}>
+                      <Plus size={16} />
+                      Ajouter
+                    </Button>
+                  }
+                />
 
-                      <div className="form-grid three-columns">
-                        <FormField label="Libelle">
-                          <input {...editForm.register(`lignes.${index}.libelle`)} />
-                        </FormField>
+                {!lineFieldArray.fields.length ? (
+                  <EmptyState title="Aucune ligne" description="Ajoute une ligne si tu veux enrichir le detail." />
+                ) : (
+                  <div className="page-stack">
+                    {lineFieldArray.fields.map((field, index) => {
+                      const currentBenefs = watchedLines[index]?.nomsBeneficiaires ?? []
+                      const currentLine = watchedLines[index]
+                      const lineDirty = lineIsDirty(index)
+                      const lineAmountError = detailLineErrors[index]
+                      const isOpen = expandedLineIndex === index
+                      const lineTitle = currentLine?.libelle?.trim() || `Ligne ${field.numeroLigne ?? 'nouvelle'}`
+                      const lineMeta = [
+                        currentLine?.dateComptabilisation ? formatDate(currentLine.dateComptabilisation) : null,
+                        currentLine?.montant?.trim() ? formatCurrencyFromCents(parseMoneyToCents(currentLine.montant)) : null,
+                        currentLine?.nomSousCategorie?.trim() || null,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')
+                      return (
+                        <div
+                          key={field.id}
+                          ref={(node) => {
+                            lineCardRefs.current[index] = node
+                          }}
+                        >
+                          <Surface className={cx('inline-panel', 'line-editor-card', isOpen && 'open')}>
+                            <div className="line-editor-head">
+                            <button
+                              type="button"
+                              className="line-editor-toggle"
+                              onClick={() => toggleDetailLine(index)}
+                            >
+                              <div className="line-editor-copy">
+                                <strong>{lineTitle}</strong>
+                                <span>{lineMeta || 'Aucun detail pour le moment'}</span>
+                              </div>
+                              <ChevronDown size={16} />
+                            </button>
 
-                          <FormField label="Date de comptabilisation">
-                            <input type="date" {...editForm.register(`lignes.${index}.dateComptabilisation`)} />
-                          </FormField>
-
-                          <FormField label="Montant">
-                            <input {...editForm.register(`lignes.${index}.montant`)} inputMode="decimal" />
-                          </FormField>
-
-                          <FormField label="Sous-categorie">
-                            <select {...editForm.register(`lignes.${index}.nomSousCategorie`)}>
-                              <option value="">Aucune</option>
-                              {(sousCategoriesQuery.data ?? []).map((item) => (
-                                <option key={item.nom} value={item.nom}>
-                                  {item.nom}
-                                </option>
-                              ))}
-                            </select>
-                          </FormField>
-
-                          <div className="form-field full-span">
-                            <span className="form-field-label">Beneficiaires</span>
-                            <div className="checkbox-grid">
-                              {(beneficiairesQuery.data ?? []).map((item) => {
-                                const checked = currentBenefs.includes(item.nom)
-                                return (
-                                  <label key={item.nom} className={`toggle-chip ${checked ? 'checked' : ''}`}>
-                                    <input
-                                      type="checkbox"
-                                      checked={checked}
-                                      onChange={() => {
-                                        const current = editForm.getValues(`lignes.${index}.nomsBeneficiaires`)
-                                        editForm.setValue(
-                                          `lignes.${index}.nomsBeneficiaires`,
-                                          checked ? current.filter((value) => value !== item.nom) : [...current, item.nom],
-                                        )
-                                      }}
-                                    />
-                                    <span>{item.nom}</span>
-                                  </label>
-                                )
-                              })}
+                            <div className="line-editor-actions">
+                              {currentLine?.nomSousCategorie ? <Badge>{currentLine.nomSousCategorie}</Badge> : null}
+                              {currentBenefs.length ? <Badge>{`${currentBenefs.length} beneficiaire${currentBenefs.length > 1 ? 's' : ''}`}</Badge> : null}
                             </div>
                           </div>
-                      </div>
-                    </Surface>
-                  )
-                })}
-              </div>
 
-              <div className="button-row">
-                <Button type="submit" disabled={updateMutation.isPending}>
-                  <Save size={16} />
-                  Sauvegarder
-                </Button>
+                          {isOpen ? (
+                            <div className="line-editor-body">
+                              <div className="section-header">
+                                <div>
+                                  <h2>Ligne {field.numeroLigne ?? 'nouvelle'}</h2>
+                                  {currentLine?.nomSousCategorie || currentBenefs.length ? (
+                                    <div className="pill-list">
+                                      {currentLine?.nomSousCategorie ? <Badge>{currentLine.nomSousCategorie}</Badge> : null}
+                                      {currentBenefs.map((name) => (
+                                        <Badge key={`${field.id}-${name}`}>{name}</Badge>
+                                      ))}
+                                    </div>
+                                  ) : null}
+                                </div>
+                                <Button
+                                  type="button"
+                                  tone="danger"
+                                  disabled={updateMutation.isPending}
+                                  onClick={async () => {
+                                    const nextLines = editForm.getValues('lignes').filter((_, lineIndex) => lineIndex !== index)
+                                    await saveLineCollection(nextLines)
+                                    setExpandedLineIndex(null)
+                                  }}
+                                >
+                                  <Trash2 size={16} />
+                                  Retirer
+                                </Button>
+                              </div>
+
+                              <div className="form-grid three-columns">
+                                <FormField label="Libelle">
+                                  <input {...editForm.register(`lignes.${index}.libelle`)} />
+                                </FormField>
+
+                                <FormField label="Date de comptabilisation">
+                                  <input type="date" {...editForm.register(`lignes.${index}.dateComptabilisation`)} />
+                                </FormField>
+
+                                <FormField label="Montant">
+                                  <div className="inline-amount-field">
+                                    <input {...editForm.register(`lignes.${index}.montant`)} inputMode="decimal" />
+                                    {lineAmountError ? <small className="inline-amount-error">{lineAmountError}</small> : null}
+                                  </div>
+                                </FormField>
+
+                                <FormField label="Sous-categorie">
+                                  <button type="button" className="picker-field" onClick={() => openSubCategoryPicker({ kind: 'line', index })}>
+                                    <div className="picker-field-content">
+                                      {currentLine?.nomSousCategorie ? (
+                                        <div className="picker-chip-list">
+                                          <span className="picker-chip">{currentLine.nomSousCategorie}</span>
+                                        </div>
+                                      ) : (
+                                        <span>Choisir</span>
+                                      )}
+                                    </div>
+                                    <ChevronDown size={16} />
+                                  </button>
+                                </FormField>
+
+                                <div className="form-field full-span">
+                                  <span className="form-field-label">Beneficiaires</span>
+                                  <div className="checkbox-grid">
+                                    {(beneficiairesQuery.data ?? []).map((item) => {
+                                      const checked = currentBenefs.includes(item.nom)
+                                      return (
+                                        <label key={item.nom} className={cx('toggle-chip', checked && 'checked')}>
+                                          <input
+                                            type="checkbox"
+                                            checked={checked}
+                                            onChange={() => {
+                                              const current = editForm.getValues(`lignes.${index}.nomsBeneficiaires`)
+                                              editForm.setValue(
+                                                `lignes.${index}.nomsBeneficiaires`,
+                                                checked ? current.filter((value) => value !== item.nom) : [...current, item.nom],
+                                              )
+                                            }}
+                                          />
+                                          <span>{item.nom}</span>
+                                        </label>
+                                      )
+                                    })}
+                                  </div>
+                                </div>
+                              </div>
+
+                              {lineDirty ? (
+                                <div className="line-editor-footer">
+                                  <Button
+                                    type="button"
+                                    tone="ghost"
+                                    disabled={updateMutation.isPending}
+                                    onClick={() => resetLineToBaseline(index)}
+                                  >
+                                    Annuler
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    disabled={updateMutation.isPending || Boolean(lineAmountError)}
+                                    onClick={async () => {
+                                      await saveLineCollection(editForm.getValues('lignes'))
+                                      setExpandedLineIndex(null)
+                                    }}
+                                  >
+                                    <Save size={16} />
+                                    Modifier
+                                  </Button>
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+                          </Surface>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
-            </form>
-          )}
-        </Surface>
-      </div>
-    </div>
+            ) : null}
+          </>
+        )}
+      </OverlayPanel>
     </div>
   )
 }
