@@ -2,7 +2,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, Save, Search, Trash2 } from 'lucide-react'
 import { useDeferredValue, useEffect, useMemo, useState } from 'react'
-import { useForm } from 'react-hook-form'
+import { useForm, useWatch } from 'react-hook-form'
 import { z } from 'zod'
 
 import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, Surface } from '../components/ui'
@@ -16,13 +16,15 @@ const schema = z.object({
 })
 
 type ExternalAccountFormValues = z.infer<typeof schema>
-type DetailTab = 'overview' | 'edit'
+
+function previewTip(label: string, value: string): string {
+  return `${label}. ${value.trim() || 'Vide'}`
+}
 
 export function ExternalAccountsPage() {
   const queryClient = useQueryClient()
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
-  const [detailTab, setDetailTab] = useState<DetailTab>('overview')
   const [search, setSearch] = useState('')
   const deferredSearch = useDeferredValue(search)
 
@@ -44,6 +46,8 @@ export function ExternalAccountsPage() {
       libelle: '',
     },
   })
+  const watchedIdentifiant = useWatch({ control: form.control, name: 'identifiant' }) ?? ''
+  const watchedLibelle = useWatch({ control: form.control, name: 'libelle' }) ?? ''
 
   useEffect(() => {
     if (!createOpen) {
@@ -87,7 +91,6 @@ export function ExternalAccountsPage() {
       await queryClient.invalidateQueries({ queryKey: ['comptes', 'externes'] })
       setCreateOpen(false)
       setSelectedId(null)
-      setDetailTab('overview')
     },
   })
 
@@ -100,7 +103,6 @@ export function ExternalAccountsPage() {
     onSuccess: async (response) => {
       await queryClient.invalidateQueries({ queryKey: ['comptes', 'externes'] })
       setSelectedId(response.identifiant)
-      setDetailTab('overview')
     },
   })
 
@@ -109,7 +111,6 @@ export function ExternalAccountsPage() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['comptes', 'externes'] })
       setSelectedId(null)
-      setDetailTab('overview')
     },
   })
 
@@ -156,7 +157,6 @@ export function ExternalAccountsPage() {
                 className={cx('catalog-card', selectedId === account.identifiant && 'selected')}
                 onClick={() => {
                   setSelectedId(account.identifiant)
-                  setDetailTab('overview')
                 }}
               >
                 <div className="catalog-card-head">
@@ -222,55 +222,46 @@ export function ExternalAccountsPage() {
         ) : !detailQuery.data ? (
           <EmptyState title="Compte introuvable" description="Impossible d afficher ce detail." />
         ) : (
-          <>
-            <div className="modal-tabs">
-              <button type="button" className={cx('modal-tab-button', detailTab === 'overview' && 'active')} onClick={() => setDetailTab('overview')}>
-                Apercu
-              </button>
-              <button type="button" className={cx('modal-tab-button', detailTab === 'edit' && 'active')} onClick={() => setDetailTab('edit')}>
-                Modifier
-              </button>
+          <form
+            className="page-stack"
+            onSubmit={form.handleSubmit(async (values) => {
+              await updateMutation.mutateAsync(values)
+            })}
+          >
+            <div className="operation-overview-grid edit-mode">
+              <div className="operation-overview-card compact preview-tip" data-tooltip={previewTip('Identifiant', watchedIdentifiant || detailQuery.data.identifiant)}>
+                <span>Identifiant</span>
+                <input {...form.register('identifiant')} />
+              </div>
+
+              <div className="operation-overview-card compact wide preview-tip" data-tooltip={previewTip('Libelle', watchedLibelle || 'Sans libelle')}>
+                <span>Libelle</span>
+                <input {...form.register('libelle')} placeholder="Sans libelle" />
+              </div>
             </div>
 
-            {detailTab === 'overview' ? (
-              <Surface className="inline-panel">
-                <div className="detail-list">
-                  <div>
-                    <span>Identifiant</span>
-                    <strong>{detailQuery.data.identifiant}</strong>
-                  </div>
-                  <div>
-                    <span>Libelle</span>
-                    <strong>{detailQuery.data.libelle ?? 'Sans libelle'}</strong>
-                  </div>
-                </div>
-              </Surface>
+            {form.formState.isDirty ? (
+              <div className="button-row operation-edit-actions">
+                <Button
+                  type="button"
+                  tone="ghost"
+                  disabled={updateMutation.isPending}
+                  onClick={() =>
+                    form.reset({
+                      identifiant: detailQuery.data.identifiant,
+                      libelle: detailQuery.data.libelle ?? '',
+                    })
+                  }
+                >
+                  Annuler
+                </Button>
+                <Button type="submit" disabled={updateMutation.isPending}>
+                  <Save size={16} />
+                  Modifier
+                </Button>
+              </div>
             ) : null}
-
-            {detailTab === 'edit' ? (
-              <form
-                className="form-grid"
-                onSubmit={form.handleSubmit(async (values) => {
-                  await updateMutation.mutateAsync(values)
-                })}
-              >
-                <FormField label="Identifiant" error={form.formState.errors.identifiant?.message}>
-                  <input {...form.register('identifiant')} />
-                </FormField>
-
-                <FormField label="Libelle" error={form.formState.errors.libelle?.message}>
-                  <textarea {...form.register('libelle')} rows={5} />
-                </FormField>
-
-                <div className="button-row">
-                  <Button type="submit" disabled={updateMutation.isPending}>
-                    <Save size={16} />
-                    Sauvegarder
-                  </Button>
-                </div>
-              </form>
-            ) : null}
-          </>
+          </form>
         )}
       </OverlayPanel>
     </div>

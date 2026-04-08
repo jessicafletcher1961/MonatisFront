@@ -8,20 +8,20 @@ import { compactNumber } from '../lib/format'
 
 const cards = [
   {
-    title: 'Donnees',
-    description: 'References et comptes dans un seul espace.',
-    to: '/donnees',
-    icon: Database,
-  },
-  {
-    title: 'Operations',
-    description: 'Creation, tri et edition.',
-    to: '/flux',
+    title: 'Operations et comptes',
+    description: 'Operations, comptes internes et externes.',
+    to: '/operations',
     icon: ReceiptText,
   },
   {
+    title: 'References',
+    description: 'Banques, titulaires, beneficiaires et categories.',
+    to: '/references',
+    icon: Database,
+  },
+  {
     title: 'Analyse',
-    description: 'Releves, syntheses et vues locales.',
+    description: 'Releves et syntheses.',
     to: '/analyse',
     icon: PiggyBank,
   },
@@ -46,7 +46,7 @@ export function DashboardPage() {
   return (
     <div className="page-stack">
       <div className="dashboard-launch-row">
-        <Button onClick={() => navigate('/flux', { state: { openCreate: true } })}>
+        <Button onClick={() => navigate('/operations', { state: { openCreate: true } })}>
           <Plus size={16} />
           Nouvelle operation
         </Button>

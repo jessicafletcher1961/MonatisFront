@@ -7,6 +7,7 @@ import {
   format,
   isAfter,
   isBefore,
+  isValid,
   parseISO,
   startOfMonth,
   startOfQuarter,
@@ -59,7 +60,12 @@ export function formatDate(iso?: string | null, pattern = 'dd MMM yyyy'): string
     return 'Non renseigne'
   }
 
-  return format(parseISO(iso), pattern)
+  const parsed = parseISO(iso)
+  if (!isValid(parsed)) {
+    return 'Non renseigne'
+  }
+
+  return format(parsed, pattern)
 }
 
 export function formatShortDate(iso?: string | null): string {
@@ -71,6 +77,10 @@ export function todayIso(): string {
 }
 
 export function isoDate(date: Date): string {
+  if (!isValid(date)) {
+    return ''
+  }
+
   return format(date, 'yyyy-MM-dd')
 }
 
@@ -87,7 +97,12 @@ export function isIsoWithinRange(iso: string, start: string, end: string): boole
 }
 
 export function dayBefore(iso: string): string {
-  return isoDate(addDays(parseISO(iso), -1))
+  const parsed = parseISO(iso)
+  if (!isValid(parsed)) {
+    return ''
+  }
+
+  return isoDate(addDays(parsed, -1))
 }
 
 function clampPeriod(start: Date, end: Date, min: Date, max: Date): { start: Date; end: Date } | null {
@@ -134,8 +149,16 @@ function endOfBimester(date: Date): Date {
 }
 
 export function buildPeriodBuckets(startIso: string, endIso: string, codeTypePeriode: MonatisPeriodCode): PeriodBucket[] {
+  if (!startIso || !endIso) {
+    return []
+  }
+
   const start = parseISO(startIso)
   const end = parseISO(endIso)
+
+  if (!isValid(start) || !isValid(end) || isAfter(start, end)) {
+    return []
+  }
 
   if (!codeTypePeriode) {
     return [createBucket(start, end)]

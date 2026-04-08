@@ -51,7 +51,6 @@ type CreateFormValues = z.infer<typeof createSchema>
 type EditFormValues = z.infer<typeof editSchema>
 type CreateStep = 'type' | 'depense' | 'recette' | 'amount' | 'review'
 type QuickEditTarget = 'type' | 'depense' | 'recette' | 'amount' | null
-type DetailTab = 'overview' | 'edit' | 'lines'
 type OperationTypeGroup = 'incoming' | 'outgoing' | 'internal' | 'technical' | 'other'
 type SubCategoryPickerTarget =
   | { kind: 'create' }
@@ -148,6 +147,20 @@ function operationLineValuesEqual(left?: Partial<OperationLineFormValues> | null
   )
 }
 
+function operationLineValuesEqualIgnoringAmount(left?: Partial<OperationLineFormValues> | null, right?: Partial<OperationLineFormValues> | null): boolean {
+  const a = normalizeOperationLineValues(left)
+  const b = normalizeOperationLineValues(right)
+
+  return (
+    a.numeroLigne === b.numeroLigne &&
+    a.libelle === b.libelle &&
+    a.dateComptabilisation === b.dateComptabilisation &&
+    a.nomSousCategorie === b.nomSousCategorie &&
+    a.nomsBeneficiaires.length === b.nomsBeneficiaires.length &&
+    a.nomsBeneficiaires.every((value, index) => value === b.nomsBeneficiaires[index])
+  )
+}
+
 function buildOperationLinePayloads(lines: OperationLineFormValues[]): OperationLinePayload[] {
   return lines
     .filter((line) => (line.montant?.trim() ?? '') !== '')
@@ -175,19 +188,91 @@ function sumOperationLineValues(lines: Array<Partial<OperationLineFormValues> | 
   }, 0)
 }
 
-function maxAllowedAmountForLine(totalCents: number, lines: Array<Partial<OperationLineFormValues> | undefined>, index: number): number {
+function primaryLineIndex(lines: Array<Partial<OperationLineFormValues> | undefined>): number {
+  if (!lines.length) {
+    return -1
+  }
+
+  const explicitIndex = lines.findIndex((line) => (line?.numeroLigne ?? null) === 0)
+  return explicitIndex === -1 ? 0 : explicitIndex
+}
+
+function remainingAmountForPrimaryLine(totalCents: number, lines: Array<Partial<OperationLineFormValues> | undefined>, primaryIndex: number): number {
+  if (primaryIndex === -1) {
+    return Math.max(0, totalCents)
+  }
+
+  return Math.max(0, totalCents - sumOperationLineValues(lines, primaryIndex))
+}
+
+function maxAllowedAmountForLine(
+  totalCents: number,
+  lines: Array<Partial<OperationLineFormValues> | undefined>,
+  index: number,
+  primaryIndex = -1,
+): number {
+  if (primaryIndex !== -1) {
+    if (index === primaryIndex) {
+      return remainingAmountForPrimaryLine(totalCents, lines, primaryIndex)
+    }
+
+    return Math.max(
+      0,
+      totalCents -
+        lines.reduce((total, line, lineIndex) => {
+          if (lineIndex === index || lineIndex === primaryIndex) {
+            return total
+          }
+
+          return total + parseMoneyToCents(line?.montant ?? '')
+        }, 0),
+    )
+  }
+
   return Math.max(0, totalCents - sumOperationLineValues(lines, index))
 }
 
-function amountLimitMessage(totalCents: number, lines: Array<Partial<OperationLineFormValues> | undefined>, index: number): string | null {
+function amountLimitMessage(
+  totalCents: number,
+  lines: Array<Partial<OperationLineFormValues> | undefined>,
+  index: number,
+  primaryIndex = -1,
+): string | null {
+  if (index === primaryIndex) {
+    return null
+  }
+
   const current = parseMoneyToCents(lines[index]?.montant ?? '')
-  const max = maxAllowedAmountForLine(totalCents, lines, index)
+  const max = maxAllowedAmountForLine(totalCents, lines, index, primaryIndex)
   return current > max ? `Max ${formatCurrencyFromCents(max)}` : null
 }
 
-function amountLimitMessageForNewLine(totalCents: number, lines: Array<Partial<OperationLineFormValues> | undefined>, amount: string): string | null {
+function maxAllowedAmountForNewLine(totalCents: number, lines: Array<Partial<OperationLineFormValues> | undefined>, primaryIndex = -1): number {
+  if (primaryIndex !== -1) {
+    return Math.max(
+      0,
+      totalCents -
+        lines.reduce((total, line, index) => {
+          if (index === primaryIndex) {
+            return total
+          }
+
+          return total + parseMoneyToCents(line?.montant ?? '')
+        }, 0),
+    )
+  }
+
+  return Math.max(0, totalCents - sumOperationLineValues(lines))
+}
+
+function amountLimitMessageForNewLine(
+  totalCents: number,
+  lines: Array<Partial<OperationLineFormValues> | undefined>,
+  amount: string,
+  primaryIndex = -1,
+): string | null {
   const current = parseMoneyToCents(amount)
-  const max = Math.max(0, totalCents - sumOperationLineValues(lines))
+  const max = maxAllowedAmountForNewLine(totalCents, lines, primaryIndex)
   return current > max ? `Max ${formatCurrencyFromCents(max)}` : null
 }
 
@@ -226,6 +311,15 @@ function operationTypeGroup(code: string): OperationTypeGroup {
 function typePriority(type: Pick<TypeOperation, 'code' | 'libelle' | 'libelleCourt'>): number {
   const order = OPERATION_TYPE_GROUP_META.findIndex((group) => group.key === operationTypeGroup(type.code))
   return order === -1 ? 999 : order
+}
+
+function typeOrderInGroup(code: string): number {
+  const explicitOrder: Record<string, number> = {
+    RECETTE: 0,
+    ACHAT: 1,
+  }
+
+  return explicitOrder[code] ?? 99
 }
 
 function flowLabelsForType(code: string): {
@@ -279,12 +373,15 @@ function compactOperationMeta(operation: OperationBasic): string {
   return [operation.numero, formatDate(operation.dateValeur)].join(' · ')
 }
 
+function previewTip(label: string, value: string): string {
+  return `${label}. ${value.trim() || 'Vide'}`
+}
+
 export function OperationsPage() {
   const queryClient = useQueryClient()
   const location = useLocation()
   const navigate = useNavigate()
   const [selectedNumero, setSelectedNumero] = useState<string | null>(null)
-  const [detailTab, setDetailTab] = useState<DetailTab>('overview')
   const [search, setSearch] = useState('')
   const [selectedTypeFilters, setSelectedTypeFilters] = useState<string[]>([])
   const [typeFilterPickerOpen, setTypeFilterPickerOpen] = useState(false)
@@ -292,7 +389,6 @@ export function OperationsPage() {
   const [createOpen, setCreateOpen] = useState(false)
   const [createStep, setCreateStep] = useState<CreateStep>('type')
   const [createOptionsOpen, setCreateOptionsOpen] = useState(false)
-  const [expandedOverviewLineIndex, setExpandedOverviewLineIndex] = useState<number | null>(null)
   const [expandedCreateLineIndex, setExpandedCreateLineIndex] = useState<number | null>(null)
   const [createLineCreateOpen, setCreateLineCreateOpen] = useState(false)
   const [createLineBaselines, setCreateLineBaselines] = useState<OperationLineFormValues[]>([])
@@ -303,6 +399,7 @@ export function OperationsPage() {
   const [expandedLineIndex, setExpandedLineIndex] = useState<number | null>(null)
   const [lineCreateOpen, setLineCreateOpen] = useState(false)
   const [lineBudgetCents, setLineBudgetCents] = useState<number | null>(null)
+  const [detailLineBaselines, setDetailLineBaselines] = useState<OperationLineFormValues[]>([])
   const [openCategoryNames, setOpenCategoryNames] = useState<string[]>([])
   const [subCategoryPickerTarget, setSubCategoryPickerTarget] = useState<SubCategoryPickerTarget>(null)
   const [subCategorySearch, setSubCategorySearch] = useState('')
@@ -409,10 +506,18 @@ export function OperationsPage() {
   const createLibelle = useWatch({ control: createForm.control, name: 'libelle' }) ?? ''
   const createDateValeur = useWatch({ control: createForm.control, name: 'dateValeur' }) ?? todayIso()
   const createNomSousCategorie = useWatch({ control: createForm.control, name: 'nomSousCategorie' }) ?? ''
-  const createBeneficiaries = useWatch({ control: createForm.control, name: 'nomsBeneficiaires' }) ?? []
+  const watchedCreateBeneficiaries = useWatch({ control: createForm.control, name: 'nomsBeneficiaires' })
+  const createBeneficiaries = useMemo(() => watchedCreateBeneficiaries ?? [], [watchedCreateBeneficiaries])
   const watchedCreateLines = useWatch({ control: createForm.control, name: 'lignes' })
   const createLines = useMemo(() => watchedCreateLines ?? [], [watchedCreateLines])
   const editType = useWatch({ control: editForm.control, name: 'codeTypeOperation' }) ?? ''
+  const editAmount = useWatch({ control: editForm.control, name: 'montant' }) ?? ''
+  const editDepense = useWatch({ control: editForm.control, name: 'identifiantCompteDepense' }) ?? ''
+  const editRecette = useWatch({ control: editForm.control, name: 'identifiantCompteRecette' }) ?? ''
+  const editDateValeur = useWatch({ control: editForm.control, name: 'dateValeur' }) ?? ''
+  const editNumero = useWatch({ control: editForm.control, name: 'numero' }) ?? ''
+  const editLibelle = useWatch({ control: editForm.control, name: 'libelle' }) ?? ''
+  const editPointee = useWatch({ control: editForm.control, name: 'pointee' }) ?? false
   const watchedEditLines = useWatch({ control: editForm.control, name: 'lignes' })
   const watchedLines = useMemo(() => watchedEditLines ?? [], [watchedEditLines])
   const newLineBeneficiaries = useWatch({ control: newLineForm.control, name: 'nomsBeneficiaires' }) ?? []
@@ -423,23 +528,7 @@ export function OperationsPage() {
   const newCreateLineAmount = useWatch({ control: newCreateLineForm.control, name: 'montant' }) ?? ''
   const amountReady = Boolean(createAmount.trim())
   const createLinePayloads = useMemo(() => buildOperationLinePayloads(createLines), [createLines])
-  const createEffectiveAmountCents = createLinePayloads.length ? sumOperationLinePayloads(createLinePayloads) : parseMoneyToCents(createAmount || '0')
-  const lineBaselines = useMemo(() => {
-    if (!detailQuery.data) {
-      return []
-    }
-
-    return detailQuery.data.lignes.map((line, index) =>
-      normalizeOperationLineValues({
-        numeroLigne: line.numeroLigne,
-        libelle: line.libelle ?? '',
-        dateComptabilisation: line.dateComptabilisation ?? detailQuery.data.dateValeur,
-        montant: toMoneyInput(line.montantEnCentimes),
-        nomSousCategorie: subCategoryNameForLine(line),
-        nomsBeneficiaires: beneficiariesForLine(detailQuery.data, index),
-      }),
-    )
-  }, [detailQuery.data])
+  const createEffectiveAmountCents = parseMoneyToCents(createAmount || '0')
 
   const compatQuery = useQuery({
     queryKey: ['operations', 'compat', createType],
@@ -478,6 +567,11 @@ export function OperationsPage() {
       pointee: detailQuery.data.pointee,
       lignes: mappedLines,
     })
+    const frame = window.requestAnimationFrame(() => {
+      setDetailLineBaselines(mappedLines.map((line) => normalizeOperationLineValues(line)))
+    })
+
+    return () => window.cancelAnimationFrame(frame)
   }, [detailQuery.data, editForm])
 
   const technicalFallbackId = technicalAccountFallback(technicalAccountsQuery.data ?? [])
@@ -627,7 +721,7 @@ export function OperationsPage() {
   }, [createOpen, createOptionsOpen, expandedCreateLineIndex])
 
   useEffect(() => {
-    if (detailTab !== 'lines' || expandedLineIndex == null) {
+    if (expandedLineIndex == null) {
       return
     }
 
@@ -639,7 +733,7 @@ export function OperationsPage() {
     })
 
     return () => window.cancelAnimationFrame(frame)
-  }, [detailTab, expandedLineIndex])
+  }, [expandedLineIndex])
 
   const depenseOptions = useMemo(() => compatQuery.data?.comptesCompatiblesDepense ?? [], [compatQuery.data?.comptesCompatiblesDepense])
   const recetteOptions = useMemo(
@@ -660,7 +754,15 @@ export function OperationsPage() {
         return true
       }
 
-      return [operation.numero, operation.libelle, operationTypeCode(operation), depenseId(operation), recetteId(operation)]
+      return [
+        operation.numero,
+        operation.libelle,
+        operationTypeCode(operation),
+        depenseId(operation),
+        recetteId(operation),
+        toMoneyInput(operation.montantEnCentimes),
+        formatCurrencyFromCents(operation.montantEnCentimes),
+      ]
         .filter(Boolean)
         .some((value) => String(value).toLowerCase().includes(needle))
     })
@@ -671,26 +773,104 @@ export function OperationsPage() {
     [operationsQuery.data, selectedNumero],
   )
   const createDefinedAmountCents = parseMoneyToCents(createAmount || '0')
+  const createPrimaryLineIndex = useMemo(() => primaryLineIndex(createLines), [createLines])
+  const createPrimaryRemainingCents = useMemo(
+    () => remainingAmountForPrimaryLine(createDefinedAmountCents, createLines, createPrimaryLineIndex),
+    [createDefinedAmountCents, createLines, createPrimaryLineIndex],
+  )
   const createLineErrors = useMemo(
-    () => createLines.map((_, index) => amountLimitMessage(createDefinedAmountCents, createLines, index)),
-    [createDefinedAmountCents, createLines],
+    () => createLines.map((_, index) => amountLimitMessage(createDefinedAmountCents, createLines, index, createPrimaryLineIndex)),
+    [createDefinedAmountCents, createLines, createPrimaryLineIndex],
   )
   const hasCreateLineOverflow = createLineErrors.some(Boolean)
-  const hasCreateLineDrafts = createLines.some((line, index) => !operationLineValuesEqual(line, createLineBaselines[index]))
-  const currentLineBudgetCents = lineBudgetCents ?? selectedOperationSummary?.montantEnCentimes ?? detailQuery.data?.montantEnCentimes ?? 0
+  const hasCreateLineDrafts = createLines.some((line, index) => index !== createPrimaryLineIndex && !operationLineValuesEqual(line, createLineBaselines[index]))
+  const createLineTotalCents = sumOperationLinePayloads(createLinePayloads)
+  const createLineGapCents = createDefinedAmountCents - createLineTotalCents
+  const createLineTotalMismatch = Boolean(createLines.length) && createLineGapCents !== 0
+  const currentLineBudgetCents =
+    (editAmount.trim() ? parseMoneyToCents(editAmount) : null) ?? lineBudgetCents ?? selectedOperationSummary?.montantEnCentimes ?? detailQuery.data?.montantEnCentimes ?? 0
+  const detailPrimaryLineIndex = useMemo(() => primaryLineIndex(watchedLines), [watchedLines])
+  const detailPrimaryRemainingCents = useMemo(
+    () => remainingAmountForPrimaryLine(currentLineBudgetCents, watchedLines, detailPrimaryLineIndex),
+    [currentLineBudgetCents, detailPrimaryLineIndex, watchedLines],
+  )
   const detailLineErrors = useMemo(
-    () => watchedLines.map((_, index) => amountLimitMessage(currentLineBudgetCents, watchedLines, index)),
-    [currentLineBudgetCents, watchedLines],
+    () => watchedLines.map((_, index) => amountLimitMessage(currentLineBudgetCents, watchedLines, index, detailPrimaryLineIndex)),
+    [currentLineBudgetCents, detailPrimaryLineIndex, watchedLines],
   )
   const hasDetailLineOverflow = detailLineErrors.some(Boolean)
+  const detailLinePayloads = useMemo(() => buildOperationLinePayloads(watchedLines), [watchedLines])
+  const detailLineTotalCents = sumOperationLinePayloads(detailLinePayloads)
+  const detailLineGapCents = currentLineBudgetCents - detailLineTotalCents
+  const detailLineTotalMismatch = Boolean(watchedLines.length) && detailLineGapCents !== 0
+  const hasDetailLineDrafts = watchedLines.some((_, index) => lineIsDirty(index))
   const newLineAmountError = useMemo(
-    () => amountLimitMessageForNewLine(currentLineBudgetCents, watchedLines, newLineAmount),
-    [currentLineBudgetCents, newLineAmount, watchedLines],
+    () => amountLimitMessageForNewLine(currentLineBudgetCents, watchedLines, newLineAmount, detailPrimaryLineIndex),
+    [currentLineBudgetCents, detailPrimaryLineIndex, newLineAmount, watchedLines],
+  )
+  const newLineMaxCents = useMemo(
+    () => maxAllowedAmountForNewLine(currentLineBudgetCents, watchedLines, detailPrimaryLineIndex),
+    [currentLineBudgetCents, detailPrimaryLineIndex, watchedLines],
   )
   const newCreateLineAmountError = useMemo(
-    () => amountLimitMessageForNewLine(createDefinedAmountCents, createLines, newCreateLineAmount),
-    [createDefinedAmountCents, createLines, newCreateLineAmount],
+    () => amountLimitMessageForNewLine(createDefinedAmountCents, createLines, newCreateLineAmount, createPrimaryLineIndex),
+    [createDefinedAmountCents, createLines, createPrimaryLineIndex, newCreateLineAmount],
   )
+  const newCreateLineMaxCents = useMemo(
+    () => maxAllowedAmountForNewLine(createDefinedAmountCents, createLines, createPrimaryLineIndex),
+    [createDefinedAmountCents, createLines, createPrimaryLineIndex],
+  )
+
+  useEffect(() => {
+    if (createPrimaryLineIndex === -1) {
+      return
+    }
+
+    const currentAmount = parseMoneyToCents(createLines[createPrimaryLineIndex]?.montant ?? '')
+    if (currentAmount !== createPrimaryRemainingCents) {
+      createForm.setValue(`lignes.${createPrimaryLineIndex}.montant`, toMoneyInput(createPrimaryRemainingCents), { shouldDirty: false })
+    }
+  }, [createForm, createLines, createPrimaryLineIndex, createPrimaryRemainingCents])
+
+  useEffect(() => {
+    if (createPrimaryLineIndex === -1) {
+      return
+    }
+
+    const nextBeneficiaries = [...createBeneficiaries].sort((left, right) => left.localeCompare(right))
+    const currentPrimaryLine = createLines[createPrimaryLineIndex]
+    const currentBeneficiaries = [...(currentPrimaryLine?.nomsBeneficiaires ?? [])].sort((left, right) => left.localeCompare(right))
+
+    if ((currentPrimaryLine?.libelle ?? '') !== createLibelle) {
+      createForm.setValue(`lignes.${createPrimaryLineIndex}.libelle`, createLibelle, { shouldDirty: false })
+    }
+
+    if ((currentPrimaryLine?.dateComptabilisation ?? '') !== createDateValeur) {
+      createForm.setValue(`lignes.${createPrimaryLineIndex}.dateComptabilisation`, createDateValeur, { shouldDirty: false })
+    }
+
+    if ((currentPrimaryLine?.nomSousCategorie ?? '') !== createNomSousCategorie) {
+      createForm.setValue(`lignes.${createPrimaryLineIndex}.nomSousCategorie`, createNomSousCategorie, { shouldDirty: false })
+    }
+
+    if (
+      currentBeneficiaries.length !== nextBeneficiaries.length ||
+      currentBeneficiaries.some((value, index) => value !== nextBeneficiaries[index])
+    ) {
+      createForm.setValue(`lignes.${createPrimaryLineIndex}.nomsBeneficiaires`, nextBeneficiaries, { shouldDirty: false })
+    }
+  }, [createBeneficiaries, createDateValeur, createForm, createLibelle, createLines, createNomSousCategorie, createPrimaryLineIndex])
+
+  useEffect(() => {
+    if (detailPrimaryLineIndex === -1) {
+      return
+    }
+
+    const currentAmount = parseMoneyToCents(watchedLines[detailPrimaryLineIndex]?.montant ?? '')
+    if (currentAmount !== detailPrimaryRemainingCents) {
+      editForm.setValue(`lignes.${detailPrimaryLineIndex}.montant`, toMoneyInput(detailPrimaryRemainingCents), { shouldDirty: false })
+    }
+  }, [detailPrimaryLineIndex, detailPrimaryRemainingCents, editForm, watchedLines])
 
   const allAccounts = useMemo(
     () => [
@@ -707,6 +887,11 @@ export function OperationsPage() {
         const priorityGap = typePriority(left) - typePriority(right)
         if (priorityGap !== 0) {
           return priorityGap
+        }
+
+        const rankGap = typeOrderInGroup(left.code) - typeOrderInGroup(right.code)
+        if (rankGap !== 0) {
+          return rankGap
         }
 
         return left.libelleCourt.localeCompare(right.libelleCourt)
@@ -772,18 +957,28 @@ export function OperationsPage() {
     [detailQuery.data?.codeTypeOperation, detailQuery.data?.typeOperation?.code, editType],
   )
   const detailReferenceSummary = useMemo(() => {
-    if (!detailQuery.data) {
+    if (!detailQuery.data && !watchedLines.length) {
       return {
         subCategories: [] as string[],
         beneficiaries: [] as string[],
       }
     }
 
-    const subCategories = Array.from(new Set(detailQuery.data.lignes.map((line) => subCategoryNameForLine(line)).filter(Boolean)))
-    const beneficiaries = Array.from(new Set(detailQuery.data.lignes.flatMap((line) => beneficiaryNamesForDisplay(line)).filter(Boolean)))
+    const sourceLines = watchedLines.length
+      ? watchedLines.map((line) => ({
+          nomSousCategorie: line.nomSousCategorie?.trim() ?? '',
+          nomsBeneficiaires: line.nomsBeneficiaires ?? [],
+        }))
+      : (detailQuery.data?.lignes ?? []).map((line) => ({
+          nomSousCategorie: subCategoryNameForLine(line),
+          nomsBeneficiaires: beneficiaryNamesForDisplay(line),
+        }))
+
+    const subCategories = Array.from(new Set(sourceLines.map((line) => line.nomSousCategorie).filter(Boolean)))
+    const beneficiaries = Array.from(new Set(sourceLines.flatMap((line) => line.nomsBeneficiaires).filter(Boolean)))
 
     return { subCategories, beneficiaries }
-  }, [detailQuery.data])
+  }, [detailQuery.data, watchedLines])
 
   const categoriesByName = useMemo(() => {
     const categories = categoriesQuery.data ?? []
@@ -815,15 +1010,12 @@ export function OperationsPage() {
 
   const createMutation = useMutation({
     mutationFn: (values: CreateFormValues) => {
-      const lines = buildOperationLinePayloads(values.lignes ?? [])
-      const montantEnCentimes = lines.length ? sumOperationLinePayloads(lines) : parseMoneyToCents(values.montant)
-
       return monatisApi.createOperation({
         numero: nullIfBlank(values.numero ?? ''),
         libelle: nullIfBlank(values.libelle ?? ''),
         codeTypeOperation: values.codeTypeOperation,
         dateValeur: nullIfBlank(values.dateValeur ?? ''),
-        montantEnCentimes,
+        montantEnCentimes: parseMoneyToCents(values.montant),
         identifiantCompteDepense: values.identifiantCompteDepense?.trim() || technicalFallbackId,
         identifiantCompteRecette: values.identifiantCompteRecette?.trim() || technicalFallbackId,
         nomSousCategorie: nullIfBlank(values.nomSousCategorie ?? ''),
@@ -842,7 +1034,7 @@ export function OperationsPage() {
           libelle: null,
           codeTypeOperation: null,
           dateValeur: null,
-          montantEnCentimes: sumOperationLinePayloads(lines),
+          montantEnCentimes: parseMoneyToCents(values.montant),
           identifiantCompteDepense: null,
           identifiantCompteRecette: null,
           pointee: null,
@@ -859,9 +1051,7 @@ export function OperationsPage() {
 
       await queryClient.invalidateQueries({ queryKey: ['operations'] })
       setSelectedNumero(null)
-      setDetailTab('overview')
       setExpandedLineIndex(null)
-      setExpandedOverviewLineIndex(null)
       resetCreateFlow()
     },
   })
@@ -869,14 +1059,13 @@ export function OperationsPage() {
   const updateMutation = useMutation({
     mutationFn: async (values: EditFormValues) => {
       const lignes = buildOperationLinePayloads(values.lignes ?? [])
-      const montantEnCentimes = lignes.length ? sumOperationLinePayloads(lignes) : values.montant ? parseMoneyToCents(values.montant) : null
 
       return monatisApi.updateOperation(selectedNumero!, {
         numero: nullIfBlank(values.numero ?? ''),
         libelle: nullIfBlank(values.libelle ?? ''),
         codeTypeOperation: nullIfBlank(values.codeTypeOperation ?? ''),
         dateValeur: nullIfBlank(values.dateValeur ?? ''),
-        montantEnCentimes,
+        montantEnCentimes: values.montant ? parseMoneyToCents(values.montant) : null,
         identifiantCompteDepense: nullIfBlank(values.identifiantCompteDepense ?? ''),
         identifiantCompteRecette: nullIfBlank(values.identifiantCompteRecette ?? ''),
         pointee: values.pointee,
@@ -895,9 +1084,7 @@ export function OperationsPage() {
       await queryClient.invalidateQueries({ queryKey: ['operations'] })
       setLineBudgetCents(null)
       setSelectedNumero(null)
-      setDetailTab('overview')
       setExpandedLineIndex(null)
-      setExpandedOverviewLineIndex(null)
       editForm.reset({
         numero: '',
         libelle: '',
@@ -909,6 +1096,7 @@ export function OperationsPage() {
         pointee: false,
         lignes: [],
       })
+      setDetailLineBaselines([])
     },
   })
 
@@ -956,7 +1144,6 @@ export function OperationsPage() {
   function openCreateFlow() {
     resetCreateFlow()
     setSelectedNumero(null)
-    setDetailTab('overview')
     setCreateOpen(true)
   }
 
@@ -1066,16 +1253,29 @@ export function OperationsPage() {
       return
     }
 
+    if (!createLines.length) {
+      const defaultLine = normalizeOperationLineValues({
+        numeroLigne: 0,
+        libelle: createLibelle,
+        dateComptabilisation: createDateValeur || todayIso(),
+        montant: createAmount,
+        nomSousCategorie: createNomSousCategorie,
+        nomsBeneficiaires: createBeneficiaries,
+      })
+
+      createLineFieldArray.replace([defaultLine])
+      setCreateLineBaselines([defaultLine])
+    }
+
     setCreateStep('review')
   }
 
   function closeDetailOverlay() {
     setSelectedNumero(null)
-    setDetailTab('overview')
     setExpandedLineIndex(null)
-    setExpandedOverviewLineIndex(null)
     setLineCreateOpen(false)
     setLineBudgetCents(null)
+    setDetailLineBaselines([])
     closeSubCategoryPicker()
   }
 
@@ -1094,6 +1294,10 @@ export function OperationsPage() {
   }
 
   function createLineIsDirty(index: number): boolean {
+    if (index === createPrimaryLineIndex) {
+      return false
+    }
+
     return !operationLineValuesEqual(createLines[index], createLineBaselines[index])
   }
 
@@ -1133,7 +1337,7 @@ export function OperationsPage() {
   }
 
   function resetLineToBaseline(index: number) {
-    const baseline = lineBaselines[index]
+    const baseline = detailLineBaselines[index]
     if (!baseline) {
       return
     }
@@ -1147,7 +1351,11 @@ export function OperationsPage() {
   }
 
   function lineIsDirty(index: number): boolean {
-    return !operationLineValuesEqual(watchedLines[index], lineBaselines[index])
+    if (index === detailPrimaryLineIndex) {
+      return !operationLineValuesEqualIgnoringAmount(watchedLines[index], detailLineBaselines[index])
+    }
+
+    return !operationLineValuesEqual(watchedLines[index], detailLineBaselines[index])
   }
 
   function toggleDetailLine(index: number) {
@@ -1301,32 +1509,24 @@ export function OperationsPage() {
     const nextValue = current === name ? '' : name
 
     if (subCategoryPickerTarget?.kind === 'createLine') {
-      createForm.setValue(`lignes.${subCategoryPickerTarget.index}.nomSousCategorie`, nextValue)
+      createForm.setValue(`lignes.${subCategoryPickerTarget.index}.nomSousCategorie`, nextValue, { shouldDirty: true, shouldTouch: true })
     } else if (subCategoryPickerTarget?.kind === 'newCreateLine') {
-      newCreateLineForm.setValue('nomSousCategorie', nextValue)
+      newCreateLineForm.setValue('nomSousCategorie', nextValue, { shouldDirty: true, shouldTouch: true })
     } else if (subCategoryPickerTarget?.kind === 'newLine') {
-      newLineForm.setValue('nomSousCategorie', nextValue)
+      newLineForm.setValue('nomSousCategorie', nextValue, { shouldDirty: true, shouldTouch: true })
     } else if (subCategoryPickerTarget?.kind === 'line') {
-      editForm.setValue(`lignes.${subCategoryPickerTarget.index}.nomSousCategorie`, nextValue)
+      editForm.setValue(`lignes.${subCategoryPickerTarget.index}.nomSousCategorie`, nextValue, { shouldDirty: true, shouldTouch: true })
     } else {
-      createForm.setValue('nomSousCategorie', nextValue)
+      createForm.setValue('nomSousCategorie', nextValue, { shouldDirty: true, shouldTouch: true })
     }
 
     closeSubCategoryPicker()
   }
 
-  async function saveLineCollection(lines: OperationLineFormValues[]) {
-    const currentValues = editForm.getValues()
+  function applyDetailLineCollection(lines: OperationLineFormValues[]) {
     const normalizedLines = lines.map((line) => normalizeOperationLineValues(line))
-    const payloadLines = buildOperationLinePayloads(normalizedLines)
-    if (payloadLines.length) {
-      editForm.setValue('montant', toMoneyInput(sumOperationLinePayloads(payloadLines)))
-    }
-    await updateMutation.mutateAsync({
-      ...currentValues,
-      montant: payloadLines.length ? toMoneyInput(sumOperationLinePayloads(payloadLines)) : currentValues.montant,
-      lignes: normalizedLines,
-    })
+    lineFieldArray.replace(normalizedLines)
+    setDetailLineBaselines(normalizedLines.map((line) => normalizeOperationLineValues(line)))
   }
 
   const createTrail = useMemo(() => {
@@ -1651,13 +1851,26 @@ export function OperationsPage() {
                   </div>
                 ) : null}
 
+                {createLines.length ? (
+                  <div className="wizard-balance-note">
+                    <span>Lignes {formatCurrencyFromCents(createLineTotalCents)}</span>
+                    {createLineTotalMismatch ? (
+                      <small className="inline-amount-error">
+                        {createLineGapCents > 0
+                          ? `Reste ${formatCurrencyFromCents(createLineGapCents)}`
+                          : `Depasse ${formatCurrencyFromCents(Math.abs(createLineGapCents))}`}
+                      </small>
+                    ) : null}
+                  </div>
+                ) : null}
+
                 <div className="button-row wizard-review-actions">
                   <Button type="button" tone="ghost" onClick={toggleCreateOptionsPanel}>
                     Options
                     {createLines.length ? <Badge>{createLines.length}</Badge> : null}
                   </Button>
                   {!createOptionsOpen ? (
-                    <Button type="submit" disabled={createMutation.isPending || !createReady || hasCreateLineOverflow || hasCreateLineDrafts}>
+                    <Button type="submit" disabled={createMutation.isPending || !createReady || hasCreateLineOverflow || hasCreateLineDrafts || createLineTotalMismatch}>
                       <Save size={16} />
                       Valider
                     </Button>
@@ -1687,15 +1900,16 @@ export function OperationsPage() {
                         <div className="page-stack">
                           {createLineFieldArray.fields.map((field, index) => {
                             const currentLine = createLines[index]
-                            const currentBenefs = currentLine?.nomsBeneficiaires ?? []
+                            const isPrimaryLine = index === createPrimaryLineIndex
+                            const currentBenefs = isPrimaryLine ? createBeneficiaries : currentLine?.nomsBeneficiaires ?? []
                             const lineDirty = createLineIsDirty(index)
                             const lineAmountError = createLineErrors[index]
                             const isOpen = expandedCreateLineIndex === index
-                            const lineTitle = currentLine?.libelle?.trim() || `Ligne ${index + 1}`
+                            const lineTitle = isPrimaryLine ? 'Ligne 0' : currentLine?.libelle?.trim() || `Ligne ${index}`
                             const lineMeta = [
-                              currentLine?.dateComptabilisation ? formatDate(currentLine.dateComptabilisation) : null,
-                              currentLine?.montant?.trim() ? formatCurrencyFromCents(parseMoneyToCents(currentLine.montant)) : null,
-                              currentLine?.nomSousCategorie?.trim() || null,
+                              isPrimaryLine ? formatDate(createDateValeur) : currentLine?.dateComptabilisation ? formatDate(currentLine.dateComptabilisation) : null,
+                              formatCurrencyFromCents(isPrimaryLine ? createPrimaryRemainingCents : parseMoneyToCents(currentLine?.montant ?? '')),
+                              isPrimaryLine ? createNomSousCategorie || null : currentLine?.nomSousCategorie?.trim() || null,
                             ]
                               .filter(Boolean)
                               .join(' · ')
@@ -1718,7 +1932,9 @@ export function OperationsPage() {
                                     </button>
 
                                     <div className="line-editor-actions">
-                                      {currentLine?.nomSousCategorie ? <Badge>{currentLine.nomSousCategorie}</Badge> : null}
+                                      {(isPrimaryLine ? createNomSousCategorie : currentLine?.nomSousCategorie) ? (
+                                        <Badge>{isPrimaryLine ? createNomSousCategorie : currentLine?.nomSousCategorie}</Badge>
+                                      ) : null}
                                       {currentBenefs.length ? <Badge>{`${currentBenefs.length} beneficiaire${currentBenefs.length > 1 ? 's' : ''}`}</Badge> : null}
                                     </div>
                                   </div>
@@ -1727,56 +1943,76 @@ export function OperationsPage() {
                                     <div className="line-editor-body">
                                       <div className="section-header">
                                         <div>
-                                          <h2>Ligne {index + 1}</h2>
-                                          {currentLine?.nomSousCategorie || currentBenefs.length ? (
+                                          <h2>{isPrimaryLine ? 'Ligne 0' : `Ligne ${index}`}</h2>
+                                          {(isPrimaryLine ? createNomSousCategorie : currentLine?.nomSousCategorie) || currentBenefs.length ? (
                                             <div className="pill-list">
-                                              {currentLine?.nomSousCategorie ? <Badge>{currentLine.nomSousCategorie}</Badge> : null}
+                                              {(isPrimaryLine ? createNomSousCategorie : currentLine?.nomSousCategorie) ? (
+                                                <Badge>{isPrimaryLine ? createNomSousCategorie : currentLine?.nomSousCategorie}</Badge>
+                                              ) : null}
                                               {currentBenefs.map((name) => (
                                                 <Badge key={`${field.id}-${name}`}>{name}</Badge>
                                               ))}
                                             </div>
                                           ) : null}
                                         </div>
-                                        <Button
-                                          type="button"
-                                          tone="danger"
-                                          onClick={() => {
-                                            createLineFieldArray.remove(index)
-                                            setCreateLineBaselines((current) => current.filter((_, lineIndex) => lineIndex !== index))
-                                            setExpandedCreateLineIndex((current) => {
-                                              if (current == null) return null
-                                              if (current === index) return null
-                                              return current > index ? current - 1 : current
-                                            })
-                                          }}
-                                        >
-                                          <Trash2 size={16} />
-                                          Retirer
-                                        </Button>
+                                        {!isPrimaryLine ? (
+                                          <Button
+                                            type="button"
+                                            tone="danger"
+                                            onClick={() => {
+                                              createLineFieldArray.remove(index)
+                                              setCreateLineBaselines((current) => current.filter((_, lineIndex) => lineIndex !== index))
+                                              setExpandedCreateLineIndex((current) => {
+                                                if (current == null) return null
+                                                if (current === index) return null
+                                                return current > index ? current - 1 : current
+                                              })
+                                            }}
+                                          >
+                                            <Trash2 size={16} />
+                                            Retirer
+                                          </Button>
+                                        ) : null}
                                       </div>
 
                                       <div className="form-grid three-columns">
                                         <FormField label="Libelle">
-                                          <input {...createForm.register(`lignes.${index}.libelle`)} />
+                                          {isPrimaryLine ? (
+                                            <input {...createForm.register('libelle')} placeholder="Aucun" />
+                                          ) : (
+                                            <input {...createForm.register(`lignes.${index}.libelle`)} />
+                                          )}
                                         </FormField>
 
                                         <FormField label="Date">
-                                          <input type="date" {...createForm.register(`lignes.${index}.dateComptabilisation`)} />
+                                          {isPrimaryLine ? (
+                                            <input type="date" {...createForm.register('dateValeur')} />
+                                          ) : (
+                                            <input type="date" {...createForm.register(`lignes.${index}.dateComptabilisation`)} />
+                                          )}
                                         </FormField>
 
                                         <FormField label="Montant">
                                           <div className="inline-amount-field">
-                                            <input {...createForm.register(`lignes.${index}.montant`)} inputMode="decimal" />
+                                            {isPrimaryLine ? (
+                                              <input value={toMoneyInput(createPrimaryRemainingCents)} inputMode="decimal" readOnly />
+                                            ) : (
+                                              <input {...createForm.register(`lignes.${index}.montant`)} inputMode="decimal" />
+                                            )}
                                             {lineAmountError ? <small className="inline-amount-error">{lineAmountError}</small> : null}
                                           </div>
                                         </FormField>
 
                                         <FormField label="Sous-categorie">
-                                          <button type="button" className="picker-field" onClick={() => openSubCategoryPicker({ kind: 'createLine', index })}>
+                                          <button
+                                            type="button"
+                                            className="picker-field"
+                                            onClick={() => openSubCategoryPicker(isPrimaryLine ? { kind: 'create' } : { kind: 'createLine', index })}
+                                          >
                                             <div className="picker-field-content">
-                                              {currentLine?.nomSousCategorie ? (
+                                              {(isPrimaryLine ? createNomSousCategorie : currentLine?.nomSousCategorie) ? (
                                                 <div className="picker-chip-list">
-                                                  <span className="picker-chip">{currentLine.nomSousCategorie}</span>
+                                                  <span className="picker-chip">{isPrimaryLine ? createNomSousCategorie : currentLine?.nomSousCategorie}</span>
                                                 </div>
                                               ) : (
                                                 <span>Choisir</span>
@@ -1797,10 +2033,20 @@ export function OperationsPage() {
                                                     type="checkbox"
                                                     checked={checked}
                                                     onChange={() => {
+                                                      if (isPrimaryLine) {
+                                                        const values = createForm.getValues('nomsBeneficiaires')
+                                                        createForm.setValue('nomsBeneficiaires', checked ? values.filter((value) => value !== item.nom) : [...values, item.nom], {
+                                                          shouldDirty: true,
+                                                          shouldTouch: true,
+                                                        })
+                                                        return
+                                                      }
+
                                                       const values = createForm.getValues(`lignes.${index}.nomsBeneficiaires`)
                                                       createForm.setValue(
                                                         `lignes.${index}.nomsBeneficiaires`,
                                                         checked ? values.filter((value) => value !== item.nom) : [...values, item.nom],
+                                                        { shouldDirty: true, shouldTouch: true },
                                                       )
                                                     }}
                                                   />
@@ -1842,7 +2088,7 @@ export function OperationsPage() {
                     </div>
 
                     <div className="button-row line-editor-submit-row">
-                      <Button type="submit" disabled={createMutation.isPending || !createReady || hasCreateLineOverflow || hasCreateLineDrafts}>
+                      <Button type="submit" disabled={createMutation.isPending || !createReady || hasCreateLineOverflow || hasCreateLineDrafts || createLineTotalMismatch}>
                         <Save size={16} />
                         Valider
                       </Button>
@@ -2049,8 +2295,6 @@ export function OperationsPage() {
                     setLineBudgetCents(operation.montantEnCentimes)
                     setSelectedNumero(operation.numero)
                     setExpandedLineIndex(null)
-                    setExpandedOverviewLineIndex(null)
-                    setDetailTab('overview')
                   }}
                 >
                   <div className="catalog-card-head">
@@ -2209,7 +2453,7 @@ export function OperationsPage() {
 
             <FormField label="Montant">
               <div className="inline-amount-field">
-                <input {...newCreateLineForm.register('montant')} inputMode="decimal" />
+                <input {...newCreateLineForm.register('montant')} inputMode="decimal" placeholder={`Max ${formatCurrencyFromCents(newCreateLineMaxCents)}`} />
                 {newCreateLineAmountError ? <small className="inline-amount-error">{newCreateLineAmountError}</small> : null}
               </div>
             </FormField>
@@ -2241,10 +2485,10 @@ export function OperationsPage() {
                         checked={checked}
                         onChange={() => {
                           const values = newCreateLineForm.getValues('nomsBeneficiaires')
-                          newCreateLineForm.setValue(
-                            'nomsBeneficiaires',
-                            checked ? values.filter((value) => value !== item.nom) : [...values, item.nom],
-                          )
+                          newCreateLineForm.setValue('nomsBeneficiaires', checked ? values.filter((value) => value !== item.nom) : [...values, item.nom], {
+                            shouldDirty: true,
+                            shouldTouch: true,
+                          })
                         }}
                       />
                       <span>{item.nom}</span>
@@ -2271,9 +2515,10 @@ export function OperationsPage() {
         <form
           className="page-stack"
           onSubmit={newLineForm.handleSubmit(async (values) => {
-            await saveLineCollection([...editForm.getValues('lignes'), values])
+            const nextValue = normalizeOperationLineValues(values)
+            lineFieldArray.append(nextValue)
+            setDetailLineBaselines((current) => [...current, nextValue])
             closeLineCreatePanel()
-            setDetailTab('lines')
             setExpandedLineIndex(null)
           })}
         >
@@ -2288,7 +2533,7 @@ export function OperationsPage() {
 
             <FormField label="Montant">
               <div className="inline-amount-field">
-                <input {...newLineForm.register('montant')} inputMode="decimal" />
+                <input {...newLineForm.register('montant')} inputMode="decimal" placeholder={`Max ${formatCurrencyFromCents(newLineMaxCents)}`} />
                 {newLineAmountError ? <small className="inline-amount-error">{newLineAmountError}</small> : null}
               </div>
             </FormField>
@@ -2320,10 +2565,10 @@ export function OperationsPage() {
                         checked={checked}
                         onChange={() => {
                           const values = newLineForm.getValues('nomsBeneficiaires')
-                          newLineForm.setValue(
-                            'nomsBeneficiaires',
-                            checked ? values.filter((value) => value !== item.nom) : [...values, item.nom],
-                          )
+                          newLineForm.setValue('nomsBeneficiaires', checked ? values.filter((value) => value !== item.nom) : [...values, item.nom], {
+                            shouldDirty: true,
+                            shouldTouch: true,
+                          })
                         }}
                       />
                       <span>{item.nom}</span>
@@ -2373,254 +2618,195 @@ export function OperationsPage() {
         ) : !detailQuery.data ? (
           <EmptyState title="Operation introuvable" description="Impossible d afficher le detail." />
         ) : (
-          <>
-            <div className="modal-tabs">
-              <button type="button" className={cx('modal-tab-button', detailTab === 'overview' && 'active')} onClick={() => setDetailTab('overview')}>
-                Apercu
-              </button>
-              <button type="button" className={cx('modal-tab-button', detailTab === 'edit' && 'active')} onClick={() => setDetailTab('edit')}>
-                Modifier
-              </button>
-              <button
-                type="button"
-                className={cx('modal-tab-button', detailTab === 'lines' && 'active')}
-                onClick={() => {
-                  setDetailTab('lines')
-                  setExpandedLineIndex(null)
-                }}
-              >
-                Lignes
-              </button>
-            </div>
-
-            {detailTab === 'overview' ? (
-              <div className="page-stack">
-                <div className="operation-overview-grid">
-                  <div className="operation-overview-card">
-                    <span>Type</span>
-                    <strong>{detailQuery.data.typeOperation?.libelleCourt ?? operationTypeCode(detailQuery.data)}</strong>
-                  </div>
-                  <div className="operation-overview-card">
-                    <span>{editFlowLabels.depenseSummary}</span>
-                    <strong>{selectedAccountLabel(allAccounts, depenseId(detailQuery.data))}</strong>
-                  </div>
-                  <div className="operation-overview-card">
-                    <span>{editFlowLabels.recetteSummary}</span>
-                    <strong>{selectedAccountLabel(allAccounts, recetteId(detailQuery.data))}</strong>
-                  </div>
-                  <div className="operation-overview-card">
-                    <span>Montant</span>
-                    <strong>{formatCurrencyFromCents(detailQuery.data.montantEnCentimes)}</strong>
-                  </div>
-                  <div className="operation-overview-card compact">
-                    <span>Date</span>
-                    <strong>{formatDate(detailQuery.data.dateValeur)}</strong>
-                  </div>
-                  <div className="operation-overview-card compact">
-                    <span>Numero</span>
-                    <strong>{detailQuery.data.numero}</strong>
-                  </div>
-                  {detailQuery.data.libelle ? (
-                    <div className="operation-overview-card compact">
-                      <span>Libelle</span>
-                      <strong>{detailQuery.data.libelle}</strong>
-                    </div>
-                  ) : null}
-                  <div className="operation-overview-card compact">
-                    <span>Pointee</span>
-                    <strong>{detailQuery.data.pointee ? 'Oui' : 'Non'}</strong>
-                  </div>
-                  {detailReferenceSummary.subCategories.length ? (
-                    <div className="operation-overview-card compact wide">
-                      <span>Sous-categories</span>
-                      <div className="pill-list">
-                        {detailReferenceSummary.subCategories.map((item) => (
-                          <Badge key={item}>{item}</Badge>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-                  {detailReferenceSummary.beneficiaries.length ? (
-                    <div className="operation-overview-card compact wide">
-                      <span>Beneficiaires</span>
-                      <div className="pill-list">
-                        {detailReferenceSummary.beneficiaries.map((item) => (
-                          <Badge key={item}>{item}</Badge>
-                        ))}
-                      </div>
-                    </div>
+          <form
+            className="page-stack"
+            onSubmit={editForm.handleSubmit(async (values) => {
+              await updateMutation.mutateAsync(values)
+            })}
+          >
+            <div className="operation-overview-grid edit-mode">
+              <div className="operation-overview-card preview-tip" data-tooltip={previewTip('Type', editType || detailQuery.data.typeOperation?.libelleCourt || detailQuery.data.codeTypeOperation || 'Aucun')}>
+                <span>Type</span>
+                <select {...editForm.register('codeTypeOperation')}>
+                  <option value="">Type actuel</option>
+                  {(typesQuery.data ?? []).map((type) => (
+                    <option key={type.code} value={type.code}>
+                      {type.libelleCourt}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="operation-overview-card preview-tip" data-tooltip={previewTip(editFlowLabels.depenseSummary, selectedAccountLabel(allAccounts, editDepense || depenseId(detailQuery.data)))}>
+                <span>{editFlowLabels.depenseSummary}</span>
+                <select {...editForm.register('identifiantCompteDepense')}>
+                  <option value="">Choisir</option>
+                  {allAccounts.map((account) => (
+                    <option key={account.identifiant} value={account.identifiant}>
+                      {accountChoiceLabel(account)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="operation-overview-card preview-tip" data-tooltip={previewTip(editFlowLabels.recetteSummary, selectedAccountLabel(allAccounts, editRecette || recetteId(detailQuery.data)))}>
+                <span>{editFlowLabels.recetteSummary}</span>
+                <select {...editForm.register('identifiantCompteRecette')}>
+                  <option value="">Choisir</option>
+                  {allAccounts.map((account) => (
+                    <option key={account.identifiant} value={account.identifiant}>
+                      {accountChoiceLabel(account)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="operation-overview-card preview-tip" data-tooltip={previewTip('Montant', formatCurrencyFromCents(parseMoneyToCents(editAmount || toMoneyInput(detailQuery.data.montantEnCentimes))))}>
+                <span>Montant</span>
+                <div className="inline-amount-field">
+                  <input {...editForm.register('montant')} inputMode="decimal" />
+                  {detailLineTotalMismatch ? (
+                    <small className="inline-amount-error">
+                      {detailLineGapCents > 0
+                        ? `Reste ${formatCurrencyFromCents(detailLineGapCents)}`
+                        : `Depasse ${formatCurrencyFromCents(Math.abs(detailLineGapCents))}`}
+                    </small>
                   ) : null}
                 </div>
+              </div>
+              <div className="operation-overview-card compact preview-tip" data-tooltip={previewTip('Date', formatDate(editDateValeur || detailQuery.data.dateValeur))}>
+                <span>Date</span>
+                <input type="date" {...editForm.register('dateValeur')} />
+              </div>
+              <div className="operation-overview-card compact preview-tip" data-tooltip={previewTip('Numero', editNumero || detailQuery.data.numero)}>
+                <span>Numero</span>
+                <input {...editForm.register('numero')} />
+              </div>
+              <div className="operation-overview-card compact wide preview-tip" data-tooltip={previewTip('Libelle', editLibelle || 'Aucun')}>
+                <span>Libelle</span>
+                <input {...editForm.register('libelle')} placeholder="Aucun" />
+              </div>
+              <label className="operation-overview-card compact toggle-card preview-tip" data-tooltip={previewTip('Pointee', editPointee ? 'Oui' : 'Non')}>
+                <span>Pointee</span>
+                <input type="checkbox" {...editForm.register('pointee')} />
+              </label>
+              {detailReferenceSummary.subCategories.length ? (
+                <div className="operation-overview-card compact wide preview-tip" data-tooltip={previewTip('Sous-categories', detailReferenceSummary.subCategories.join(', '))}>
+                  <span>Sous-categories</span>
+                  <div className="pill-list">
+                    {detailReferenceSummary.subCategories.map((item) => (
+                      <Badge key={item}>{item}</Badge>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              {detailReferenceSummary.beneficiaries.length ? (
+                <div className="operation-overview-card compact wide preview-tip" data-tooltip={previewTip('Beneficiaires', detailReferenceSummary.beneficiaries.join(', '))}>
+                  <span>Beneficiaires</span>
+                  <div className="pill-list">
+                    {detailReferenceSummary.beneficiaries.map((item) => (
+                      <Badge key={item}>{item}</Badge>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
 
-                <Surface className="inline-panel operation-lines-panel">
-                  {!detailQuery.data.lignes.length ? (
-                    <EmptyState title="Aucune ligne" description="Cette operation ne contient pas encore de ligne detaillee." />
-                  ) : (
-                    <div className="operation-line-list">
-                      {detailQuery.data.lignes.map((line, index) => {
-                        const lineBeneficiaries = beneficiaryNamesForDisplay(line)
-                        const isOpen = expandedOverviewLineIndex === index
-                        return (
-                          <div key={line.numeroLigne} className={cx('operation-line-row', isOpen && 'open')}>
-                            <button
-                              type="button"
-                              className="operation-line-toggle"
-                              onClick={() => setExpandedOverviewLineIndex((current) => (current === index ? null : index))}
-                            >
-                              <div className="operation-line-main">
-                                <strong>{line.numeroLigne ?? index + 1}</strong>
-                                <span>{formatDate(line.dateComptabilisation)}</span>
-                                <span>{formatCurrencyFromCents(line.montantEnCentimes)}</span>
-                                <span>{subCategoryNameForLine(line) || 'Sans sous-categorie'}</span>
-                              </div>
-                              <ChevronDown size={14} />
-                            </button>
+            {editForm.formState.isDirty ? (
+              <div className="button-row operation-edit-actions">
+                <Button
+                  type="button"
+                  tone="ghost"
+                  disabled={updateMutation.isPending}
+                  onClick={() => {
+                    if (!detailQuery.data) {
+                      return
+                    }
 
-                            {isOpen ? (
-                              <div className="operation-line-detail">
-                                {line.libelle ? (
-                                  <div className="operation-line-detail-row">
-                                    <span>Libelle</span>
-                                    <strong>{line.libelle}</strong>
-                                  </div>
-                                ) : null}
-                                {lineBeneficiaries.length ? (
-                                  <div className="operation-line-detail-row">
-                                    <span>Beneficiaires</span>
-                                    <div className="pill-list">
-                                      {lineBeneficiaries.map((name) => (
-                                        <Badge key={`${line.numeroLigne}-${name}`}>{name}</Badge>
-                                      ))}
-                                    </div>
-                                  </div>
-                                ) : null}
-                              </div>
-                            ) : null}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                </Surface>
+                    const mappedLines = detailQuery.data.lignes.map((line, index) => ({
+                      numeroLigne: line.numeroLigne,
+                      libelle: line.libelle ?? '',
+                      dateComptabilisation: line.dateComptabilisation ?? detailQuery.data.dateValeur,
+                      montant: toMoneyInput(line.montantEnCentimes),
+                      nomSousCategorie: subCategoryNameForLine(line),
+                      nomsBeneficiaires: beneficiariesForLine(detailQuery.data, index),
+                    }))
+
+                    editForm.reset({
+                      numero: detailQuery.data.numero,
+                      libelle: detailQuery.data.libelle ?? '',
+                      codeTypeOperation: operationTypeCode(detailQuery.data),
+                      dateValeur: detailQuery.data.dateValeur,
+                      montant: toMoneyInput(detailQuery.data.montantEnCentimes),
+                      identifiantCompteDepense: depenseId(detailQuery.data),
+                      identifiantCompteRecette: recetteId(detailQuery.data),
+                      pointee: detailQuery.data.pointee,
+                      lignes: mappedLines,
+                    })
+                    setDetailLineBaselines(mappedLines.map((line) => normalizeOperationLineValues(line)))
+                    setExpandedLineIndex(null)
+                  }}
+                >
+                  Annuler
+                </Button>
+                <Button type="submit" disabled={updateMutation.isPending || hasDetailLineOverflow || detailLineTotalMismatch || hasDetailLineDrafts}>
+                  <Save size={16} />
+                  Modifier
+                </Button>
               </div>
             ) : null}
 
-            {detailTab === 'edit' ? (
-              <form
-                className="page-stack"
-                onSubmit={editForm.handleSubmit(async (values) => {
-                  await updateMutation.mutateAsync(values)
-                })}
-              >
-                <div className="form-grid three-columns">
-                  <FormField label="Numero">
-                    <input {...editForm.register('numero')} />
-                  </FormField>
-
-                  <FormField label="Type">
-                    <select {...editForm.register('codeTypeOperation')}>
-                      <option value="">Type actuel</option>
-                      {(typesQuery.data ?? []).map((type) => (
-                        <option key={type.code} value={type.code}>
-                          {type.libelleCourt}
-                        </option>
-                      ))}
-                    </select>
-                  </FormField>
-
-                  <FormField label="Date">
-                    <input type="date" {...editForm.register('dateValeur')} />
-                  </FormField>
-
-                  <FormField label="Montant">
-                    <input {...editForm.register('montant')} inputMode="decimal" />
-                  </FormField>
-
-                  <FormField label={editFlowLabels.depenseStep}>
-                    <select {...editForm.register('identifiantCompteDepense')}>
-                      <option value="">Choisir</option>
-                      {allAccounts.map((account) => (
-                        <option key={account.identifiant} value={account.identifiant}>
-                          {accountChoiceLabel(account)}
-                        </option>
-                      ))}
-                    </select>
-                  </FormField>
-
-                  <FormField label={editFlowLabels.recetteStep}>
-                    <select {...editForm.register('identifiantCompteRecette')}>
-                      <option value="">Choisir</option>
-                      {allAccounts.map((account) => (
-                        <option key={account.identifiant} value={account.identifiant}>
-                          {accountChoiceLabel(account)}
-                        </option>
-                      ))}
-                    </select>
-                  </FormField>
-
-                  <FormField label="Libelle">
-                    <textarea {...editForm.register('libelle')} rows={3} />
-                  </FormField>
-
-                  <label className="toggle-inline">
-                    <input type="checkbox" {...editForm.register('pointee')} />
-                    <span>Operation pointee</span>
-                  </label>
-                </div>
-
-                <div className="button-row">
-                  <Button type="submit" disabled={updateMutation.isPending}>
-                    <Save size={16} />
-                    Sauvegarder
+            <div className="page-stack">
+              <SectionHeader
+                title="Lignes"
+                aside={
+                  <Button type="button" tone="ghost" disabled={hasDetailLineOverflow} onClick={openLineCreatePanel}>
+                    <Plus size={16} />
+                    Ajouter
                   </Button>
+                }
+              />
+
+              {detailLinePayloads.length ? (
+                <div className="wizard-balance-note">
+                  <span>Lignes {formatCurrencyFromCents(detailLineTotalCents)}</span>
+                  {detailLineTotalMismatch ? (
+                    <small className="inline-amount-error">
+                      {detailLineGapCents > 0
+                        ? `Reste ${formatCurrencyFromCents(detailLineGapCents)}`
+                        : `Depasse ${formatCurrencyFromCents(Math.abs(detailLineGapCents))}`}
+                    </small>
+                  ) : null}
                 </div>
-              </form>
-            ) : null}
+              ) : null}
 
-            {detailTab === 'lines' ? (
-              <div className="page-stack">
-                <SectionHeader
-                  title="Lignes de detail"
-                  aside={
-                    <Button type="button" tone="ghost" disabled={hasDetailLineOverflow} onClick={openLineCreatePanel}>
-                      <Plus size={16} />
-                      Ajouter
-                    </Button>
-                  }
-                />
+              {!lineFieldArray.fields.length ? (
+                <EmptyState title="Aucune ligne" description="Ajoute une ligne si tu veux enrichir le detail." />
+              ) : (
+                <div className="page-stack">
+                  {lineFieldArray.fields.map((field, index) => {
+                    const currentBenefs = watchedLines[index]?.nomsBeneficiaires ?? []
+                    const currentLine = watchedLines[index]
+                    const isPrimaryLine = index === detailPrimaryLineIndex
+                    const lineDirty = lineIsDirty(index)
+                    const lineAmountError = detailLineErrors[index]
+                    const isOpen = expandedLineIndex === index
+                    const lineTitle = currentLine?.libelle?.trim() || (isPrimaryLine ? 'Ligne 0' : `Ligne ${field.numeroLigne ?? index}`)
+                    const lineMeta = [
+                      currentLine?.dateComptabilisation ? formatDate(currentLine.dateComptabilisation) : null,
+                      formatCurrencyFromCents(isPrimaryLine ? detailPrimaryRemainingCents : parseMoneyToCents(currentLine?.montant ?? '')),
+                      currentLine?.nomSousCategorie?.trim() || null,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')
 
-                {!lineFieldArray.fields.length ? (
-                  <EmptyState title="Aucune ligne" description="Ajoute une ligne si tu veux enrichir le detail." />
-                ) : (
-                  <div className="page-stack">
-                    {lineFieldArray.fields.map((field, index) => {
-                      const currentBenefs = watchedLines[index]?.nomsBeneficiaires ?? []
-                      const currentLine = watchedLines[index]
-                      const lineDirty = lineIsDirty(index)
-                      const lineAmountError = detailLineErrors[index]
-                      const isOpen = expandedLineIndex === index
-                      const lineTitle = currentLine?.libelle?.trim() || `Ligne ${field.numeroLigne ?? 'nouvelle'}`
-                      const lineMeta = [
-                        currentLine?.dateComptabilisation ? formatDate(currentLine.dateComptabilisation) : null,
-                        currentLine?.montant?.trim() ? formatCurrencyFromCents(parseMoneyToCents(currentLine.montant)) : null,
-                        currentLine?.nomSousCategorie?.trim() || null,
-                      ]
-                        .filter(Boolean)
-                        .join(' · ')
-                      return (
-                        <div
-                          key={field.id}
-                          ref={(node) => {
-                            lineCardRefs.current[index] = node
-                          }}
-                        >
-                          <Surface className={cx('inline-panel', 'line-editor-card', isOpen && 'open')}>
-                            <div className="line-editor-head">
-                            <button
-                              type="button"
-                              className="line-editor-toggle"
-                              onClick={() => toggleDetailLine(index)}
-                            >
+                    return (
+                      <div
+                        key={field.id}
+                        ref={(node) => {
+                          lineCardRefs.current[index] = node
+                        }}
+                      >
+                        <Surface className={cx('inline-panel', 'line-editor-card', isOpen && 'open')}>
+                          <div className="line-editor-head">
+                            <button type="button" className="line-editor-toggle" onClick={() => toggleDetailLine(index)}>
                               <div className="line-editor-copy">
                                 <strong>{lineTitle}</strong>
                                 <span>{lineMeta || 'Aucun detail pour le moment'}</span>
@@ -2638,7 +2824,7 @@ export function OperationsPage() {
                             <div className="line-editor-body">
                               <div className="section-header">
                                 <div>
-                                  <h2>Ligne {field.numeroLigne ?? 'nouvelle'}</h2>
+                                  <h2>{isPrimaryLine ? 'Ligne 0' : `Ligne ${field.numeroLigne ?? index}`}</h2>
                                   {currentLine?.nomSousCategorie || currentBenefs.length ? (
                                     <div className="pill-list">
                                       {currentLine?.nomSousCategorie ? <Badge>{currentLine.nomSousCategorie}</Badge> : null}
@@ -2648,19 +2834,21 @@ export function OperationsPage() {
                                     </div>
                                   ) : null}
                                 </div>
-                                <Button
-                                  type="button"
-                                  tone="danger"
-                                  disabled={updateMutation.isPending}
-                                  onClick={async () => {
-                                    const nextLines = editForm.getValues('lignes').filter((_, lineIndex) => lineIndex !== index)
-                                    await saveLineCollection(nextLines)
-                                    setExpandedLineIndex(null)
-                                  }}
-                                >
-                                  <Trash2 size={16} />
-                                  Retirer
-                                </Button>
+                                {!isPrimaryLine ? (
+                                  <Button
+                                    type="button"
+                                    tone="danger"
+                                    disabled={updateMutation.isPending}
+                                    onClick={() => {
+                                      const nextLines = editForm.getValues('lignes').filter((_, lineIndex) => lineIndex !== index)
+                                      applyDetailLineCollection(nextLines)
+                                      setExpandedLineIndex(null)
+                                    }}
+                                  >
+                                    <Trash2 size={16} />
+                                    Retirer
+                                  </Button>
+                                ) : null}
                               </div>
 
                               <div className="form-grid three-columns">
@@ -2674,7 +2862,11 @@ export function OperationsPage() {
 
                                 <FormField label="Montant">
                                   <div className="inline-amount-field">
-                                    <input {...editForm.register(`lignes.${index}.montant`)} inputMode="decimal" />
+                                    {isPrimaryLine ? (
+                                      <input value={toMoneyInput(detailPrimaryRemainingCents)} inputMode="decimal" readOnly />
+                                    ) : (
+                                      <input {...editForm.register(`lignes.${index}.montant`)} inputMode="decimal" />
+                                    )}
                                     {lineAmountError ? <small className="inline-amount-error">{lineAmountError}</small> : null}
                                   </div>
                                 </FormField>
@@ -2709,6 +2901,7 @@ export function OperationsPage() {
                                               editForm.setValue(
                                                 `lignes.${index}.nomsBeneficiaires`,
                                                 checked ? current.filter((value) => value !== item.nom) : [...current, item.nom],
+                                                { shouldDirty: true, shouldTouch: true },
                                               )
                                             }}
                                           />
@@ -2722,19 +2915,15 @@ export function OperationsPage() {
 
                               {lineDirty ? (
                                 <div className="line-editor-footer">
-                                  <Button
-                                    type="button"
-                                    tone="ghost"
-                                    disabled={updateMutation.isPending}
-                                    onClick={() => resetLineToBaseline(index)}
-                                  >
+                                  <Button type="button" tone="ghost" disabled={updateMutation.isPending} onClick={() => resetLineToBaseline(index)}>
                                     Annuler
                                   </Button>
                                   <Button
                                     type="button"
                                     disabled={updateMutation.isPending || Boolean(lineAmountError)}
-                                    onClick={async () => {
-                                      await saveLineCollection(editForm.getValues('lignes'))
+                                    onClick={() => {
+                                      const nextValue = normalizeOperationLineValues(editForm.getValues(`lignes.${index}`))
+                                      setDetailLineBaselines((current) => current.map((line, lineIndex) => (lineIndex === index ? nextValue : line)))
                                       setExpandedLineIndex(null)
                                     }}
                                   >
@@ -2745,15 +2934,14 @@ export function OperationsPage() {
                               ) : null}
                             </div>
                           ) : null}
-                          </Surface>
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-            ) : null}
-          </>
+                        </Surface>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </form>
         )}
       </OverlayPanel>
     </div>

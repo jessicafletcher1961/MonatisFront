@@ -2,10 +2,10 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, Save, Search, Trash2 } from 'lucide-react'
 import { useDeferredValue, useEffect, useMemo, useState } from 'react'
-import { useForm } from 'react-hook-form'
+import { useForm, useWatch } from 'react-hook-form'
 import { z } from 'zod'
 
-import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, SectionHeader, Surface } from '../components/ui'
+import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, Surface } from '../components/ui'
 import { cx } from '../lib/cx'
 import { apiErrorMessage, type ReferenceDetail, type ReferenceListItem, type ReferenceResource, monatisApi } from '../lib/monatis-api'
 import { nullIfBlank } from '../lib/format'
@@ -26,7 +26,10 @@ const baseSchema = z.object({
 })
 
 type ReferenceFormValues = z.infer<typeof baseSchema>
-type DetailTab = 'overview' | 'edit'
+
+function previewTip(label: string, value: string): string {
+  return `${label}. ${value.trim() || 'Vide'}`
+}
 
 function listHint(resource: ReferenceResource, item: ReferenceListItem): string {
   switch (resource) {
@@ -64,7 +67,6 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
   const queryClient = useQueryClient()
   const [selectedName, setSelectedName] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
-  const [detailTab, setDetailTab] = useState<DetailTab>('overview')
   const [categoryPickerOpen, setCategoryPickerOpen] = useState(false)
   const [categorySearch, setCategorySearch] = useState('')
   const [search, setSearch] = useState('')
@@ -96,6 +98,9 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
       nomCategorie: '',
     },
   })
+  const watchedNom = useWatch({ control: form.control, name: 'nom' }) ?? ''
+  const watchedLibelle = useWatch({ control: form.control, name: 'libelle' }) ?? ''
+  const watchedNomCategorie = useWatch({ control: form.control, name: 'nomCategorie' }) ?? ''
 
   useEffect(() => {
     if (!createOpen) {
@@ -166,7 +171,6 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
       await queryClient.invalidateQueries({ queryKey: ['references', config.resource] })
       setCreateOpen(false)
       setSelectedName(null)
-      setDetailTab('overview')
     },
   })
 
@@ -192,7 +196,6 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
     onSuccess: async (response) => {
       await queryClient.invalidateQueries({ queryKey: ['references', config.resource] })
       setSelectedName(response.nom)
-      setDetailTab('overview')
     },
   })
 
@@ -207,7 +210,6 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['references', config.resource] })
       setSelectedName(null)
-      setDetailTab('overview')
     },
   })
 
@@ -256,7 +258,6 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
                 className={cx('catalog-card', selectedName === item.nom && 'selected')}
                 onClick={() => {
                   setSelectedName(item.nom)
-                  setDetailTab('overview')
                 }}
               >
                 <div className="catalog-card-head">
@@ -296,9 +297,9 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
             <FormField label="Categorie de rattachement" error={form.formState.errors.nomCategorie?.message}>
               <button type="button" className="picker-field" onClick={() => setCategoryPickerOpen(true)}>
                 <div className="picker-field-content">
-                  {form.getValues('nomCategorie') ? (
+                  {watchedNomCategorie ? (
                     <div className="picker-chip-list">
-                      <span className="picker-chip">{form.getValues('nomCategorie')}</span>
+                      <span className="picker-chip">{watchedNomCategorie}</span>
                     </div>
                   ) : (
                     <span>Choisir une categorie</span>
@@ -330,14 +331,14 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
           ) : (
             <div className="picker-option-list">
               {filteredCategories.map((category) => {
-                const selected = form.getValues('nomCategorie') === category.nom
+                const selected = watchedNomCategorie === category.nom
                 return (
                   <button
                     key={category.nom}
                     type="button"
                     className={cx('picker-option', selected && 'selected')}
                     onClick={() => {
-                      form.setValue('nomCategorie', category.nom)
+                      form.setValue('nomCategorie', category.nom, { shouldDirty: true, shouldTouch: true })
                       setCategoryPickerOpen(false)
                     }}
                   >
@@ -379,77 +380,85 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
         ) : !detailQuery.data ? (
           <EmptyState title="Reference introuvable" description="Impossible d afficher ce detail." />
         ) : (
-          <>
-            <div className="modal-tabs">
-              <button type="button" className={cx('modal-tab-button', detailTab === 'overview' && 'active')} onClick={() => setDetailTab('overview')}>
-                Apercu
-              </button>
-              <button type="button" className={cx('modal-tab-button', detailTab === 'edit' && 'active')} onClick={() => setDetailTab('edit')}>
-                Modifier
-              </button>
-            </div>
+          <form
+            className="page-stack"
+            onSubmit={form.handleSubmit(async (values) => {
+              if (config.resource === 'souscategorie' && !values.nomCategorie?.trim()) {
+                form.setError('nomCategorie', { message: 'La categorie est obligatoire.' })
+                return
+              }
 
-            {detailTab === 'overview' ? (
-              <Surface className="inline-panel">
-                <SectionHeader title={detailQuery.data.nom} subtitle={detailQuery.data.libelle ?? 'Sans libelle'} />
-                {detailSummary(config.resource, detailQuery.data).length ? (
+              await updateMutation.mutateAsync(values)
+            })}
+          >
+            <div className="operation-overview-grid edit-mode">
+              <div className="operation-overview-card compact preview-tip" data-tooltip={previewTip('Nom', watchedNom || detailQuery.data.nom)}>
+                <span>Nom</span>
+                <input {...form.register('nom')} />
+              </div>
+
+              <div className="operation-overview-card wide preview-tip" data-tooltip={previewTip('Libelle', watchedLibelle || 'Aucun')}>
+                <span>Libelle</span>
+                <input {...form.register('libelle')} placeholder="Aucun" />
+              </div>
+
+              {config.resource === 'souscategorie' ? (
+                <div className="operation-overview-card compact wide preview-tip" data-tooltip={previewTip('Categorie', watchedNomCategorie || 'Aucune')}>
+                  <span>Categorie</span>
+                  <button type="button" className="picker-field picker-field-compact" onClick={() => setCategoryPickerOpen(true)}>
+                    <div className="picker-field-content">
+                      {watchedNomCategorie ? (
+                        <div className="picker-chip-list">
+                          <span className="picker-chip">{watchedNomCategorie}</span>
+                        </div>
+                      ) : (
+                        <span>Choisir</span>
+                      )}
+                    </div>
+                    <Search size={16} />
+                  </button>
+                </div>
+              ) : null}
+
+              {config.resource !== 'souscategorie' && detailSummary(config.resource, detailQuery.data).length ? (
+                <div className="operation-overview-card compact wide preview-tip" data-tooltip={previewTip('Liens', `${detailSummary(config.resource, detailQuery.data).length} element(s)`)}>
+                  <span>Liens</span>
                   <div className="pill-list">
                     {detailSummary(config.resource, detailQuery.data).map((item) => (
                       <Badge key={item}>{item}</Badge>
                     ))}
                   </div>
-                ) : (
-                  <div className="catalog-meta">Aucune relation supplementaire.</div>
-                )}
-              </Surface>
-            ) : null}
-
-            {detailTab === 'edit' ? (
-              <form
-                className="form-grid"
-                onSubmit={form.handleSubmit(async (values) => {
-                  if (config.resource === 'souscategorie' && !values.nomCategorie?.trim()) {
-                    form.setError('nomCategorie', { message: 'La categorie est obligatoire.' })
-                    return
-                  }
-
-                  await updateMutation.mutateAsync(values)
-                })}
-              >
-                <FormField label="Nom" error={form.formState.errors.nom?.message}>
-                  <input {...form.register('nom')} />
-                </FormField>
-
-                <FormField label="Libelle" error={form.formState.errors.libelle?.message}>
-                  <textarea {...form.register('libelle')} rows={4} />
-                </FormField>
-
-                {config.resource === 'souscategorie' ? (
-                  <FormField label="Categorie de rattachement" error={form.formState.errors.nomCategorie?.message}>
-                    <button type="button" className="picker-field" onClick={() => setCategoryPickerOpen(true)}>
-                      <div className="picker-field-content">
-                        {form.getValues('nomCategorie') ? (
-                          <div className="picker-chip-list">
-                            <span className="picker-chip">{form.getValues('nomCategorie')}</span>
-                          </div>
-                        ) : (
-                          <span>Choisir une categorie</span>
-                        )}
-                      </div>
-                      <Search size={16} />
-                    </button>
-                  </FormField>
-                ) : null}
-
-                <div className="button-row">
-                  <Button type="submit" disabled={updateMutation.isPending}>
-                    <Save size={16} />
-                    Sauvegarder
-                  </Button>
                 </div>
-              </form>
+              ) : null}
+            </div>
+
+            {form.formState.isDirty ? (
+              <div className="button-row operation-edit-actions">
+                <Button
+                  type="button"
+                  tone="ghost"
+                  disabled={updateMutation.isPending}
+                  onClick={() => {
+                    if (!detailQuery.data) {
+                      return
+                    }
+
+                    form.reset({
+                      nom: detailQuery.data.nom,
+                      libelle: detailQuery.data.libelle ?? '',
+                      nomCategorie: detailQuery.data.categorie?.nom ?? '',
+                    })
+                  }}
+                >
+                  Annuler
+                </Button>
+                <Button type="submit" disabled={updateMutation.isPending}>
+                  <Save size={16} />
+                  Modifier
+                </Button>
+              </div>
             ) : null}
-          </>
+          </form>
         )}
       </OverlayPanel>
     </div>

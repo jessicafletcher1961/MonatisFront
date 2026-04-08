@@ -4,6 +4,7 @@ import {
   type CompteExterneBasic,
   type CompteInterneBasic,
   type CompteTechniqueBasic,
+  type EvaluationBasic,
   type OperationBasic,
   type ReferenceBase,
   type ReferenceListItem,
@@ -58,6 +59,14 @@ export interface PeriodTotalView {
   recette: number
   depense: number
   solde: number
+  details: Array<{
+    numero: string
+    date: string
+    libelle: string | null
+    montantEnEuros: number
+    sousCategorieNom: string | null
+    beneficiaires: string[]
+  }>
 }
 
 export interface DepenseRecetteSubcategoryView {
@@ -163,6 +172,7 @@ function periodTemplate(periods: PeriodBucket[]): PeriodTotalView[] {
     recette: 0,
     depense: 0,
     solde: 0,
+    details: [],
   }))
 }
 
@@ -206,6 +216,19 @@ function recetteId(operation: OperationBasic): string {
   return operation.identifiantCompteRecette ?? operation.compteRecette?.identifiant ?? ''
 }
 
+function evaluationAccountId(evaluation: EvaluationBasic): string {
+  return evaluation.identifiantCompteInterne ?? evaluation.compteInterne?.identifiant ?? ''
+}
+
+function latestEvaluationAtDate(accountId: string, evaluations: EvaluationBasic[], targetDate: string): EvaluationBasic | null {
+  return (
+    evaluations
+      .filter((evaluation) => evaluationAccountId(evaluation) === accountId)
+      .filter((evaluation) => evaluation.dateSolde <= targetDate)
+      .sort((left, right) => right.dateSolde.localeCompare(left.dateSolde) || right.cle.localeCompare(left.cle))[0] ?? null
+  )
+}
+
 export function buildAccountLookup(
   internalAccounts: CompteInterneBasic[],
   externalAccounts: CompteExterneBasic[],
@@ -247,10 +270,22 @@ function operationAffectsAccount(operation: OperationBasic, accountId: string): 
   return depenseId(operation) === accountId || recetteId(operation) === accountId
 }
 
-export function computeBalanceAtDate(account: CompteInterneBasic, operations: OperationBasic[], targetDate: string): number {
+export function computeBalanceAtDate(
+  account: CompteInterneBasic,
+  operations: OperationBasic[],
+  targetDate: string,
+  evaluations: EvaluationBasic[] = [],
+): number {
   let balance = account.montantSoldeInitialEnCentimes ?? 0
+  let referenceDate = account.dateSoldeInitial
 
-  if (targetDate < account.dateSoldeInitial) {
+  const latestEvaluation = latestEvaluationAtDate(account.identifiant, evaluations, targetDate)
+  if (latestEvaluation && latestEvaluation.dateSolde >= referenceDate) {
+    balance = latestEvaluation.montantSoldeEnCentimes
+    referenceDate = latestEvaluation.dateSolde
+  }
+
+  if (targetDate < referenceDate) {
     return centsToEuros(balance)
   }
 
@@ -259,7 +294,7 @@ export function computeBalanceAtDate(account: CompteInterneBasic, operations: Op
       return
     }
 
-    if (operation.dateValeur < account.dateSoldeInitial || operation.dateValeur > targetDate) {
+    if (operation.dateValeur <= referenceDate || operation.dateValeur > targetDate) {
       return
     }
 
@@ -281,6 +316,7 @@ export function buildReleveCompte(
   lookup: Map<string, AccountLookupEntry>,
   start: string,
   end: string,
+  evaluations: EvaluationBasic[] = [],
 ): ReleveCompteView {
   const operationsRecette: ReleveRow[] = []
   const operationsDepense: ReleveRow[] = []
@@ -317,8 +353,8 @@ export function buildReleveCompte(
   const montantTotalOperationsDepenseEnEuros = roundMoney(
     operationsDepense.reduce((total, item) => total + item.montantEnEuros, 0),
   )
-  const montantSoldeDebutReleveEnEuros = roundMoney(computeBalanceAtDate(account, operations, dayBefore(start)))
-  const montantSoldeFinReleveEnEuros = roundMoney(computeBalanceAtDate(account, operations, end))
+  const montantSoldeDebutReleveEnEuros = roundMoney(computeBalanceAtDate(account, operations, dayBefore(start), evaluations))
+  const montantSoldeFinReleveEnEuros = roundMoney(computeBalanceAtDate(account, operations, end, evaluations))
 
   return {
     enteteCompte: {
@@ -350,6 +386,7 @@ export function buildResumesComptes(
   dateSolde: string,
   codesTypes?: string[],
   accountIds?: string[],
+  evaluations: EvaluationBasic[] = [],
 ): ResumeCompteView[] {
   return internalAccounts
     .filter((account) => !codesTypes?.length || codesTypes.includes(account.codeTypeFonctionnement))
@@ -360,7 +397,7 @@ export function buildResumesComptes(
       libelle: account.libelle,
       typeFonctionnement: account.codeTypeFonctionnement,
       dateSolde,
-      montantSoldeEnEuros: roundMoney(computeBalanceAtDate(account, operations, dateSolde)),
+      montantSoldeEnEuros: roundMoney(computeBalanceAtDate(account, operations, dateSolde, evaluations)),
       banque: account.nomBanque,
       titulaires: account.nomsTitulaires,
     }))
@@ -443,6 +480,14 @@ export function buildDepenseRecetteReport(params: {
         const bucket = categoryRow.totals[index]
         const subBucket = subcategoryRow.periods[index]
         const amount = centsToEuros(line.montantEnCentimes)
+        const detailItem = {
+          numero: operation.numero,
+          date: line.date,
+          libelle: line.libelle,
+          montantEnEuros: roundMoney(amount),
+          sousCategorieNom: line.sousCategorieNom,
+          beneficiaires: line.beneficiaires,
+        }
 
         if (operationCode(operation) === 'RECETTE') {
           bucket.recette += amount
@@ -454,13 +499,20 @@ export function buildDepenseRecetteReport(params: {
 
         bucket.solde = bucket.recette - bucket.depense
         subBucket.solde = subBucket.recette - subBucket.depense
+        bucket.details.push(detailItem)
+        subBucket.details.push(detailItem)
       })
     })
 
   const categories = Array.from(categoryRows.values())
     .map((row) => ({
       ...row,
-      totals: row.totals.map((item) => ({ ...item, recette: roundMoney(item.recette), depense: roundMoney(item.depense), solde: roundMoney(item.solde) })),
+      totals: row.totals.map((item) => ({
+        ...item,
+        recette: roundMoney(item.recette),
+        depense: roundMoney(item.depense),
+        solde: roundMoney(item.solde),
+      })),
       children: row.children
         .sort((left, right) => (left.sousCategorie?.nom ?? '').localeCompare(right.sousCategorie?.nom ?? ''))
         .map((child) => ({
@@ -481,6 +533,7 @@ export function buildDepenseRecetteReport(params: {
       totals[index].recette += period.recette
       totals[index].depense += period.depense
       totals[index].solde = totals[index].recette - totals[index].depense
+      totals[index].details.push(...period.details)
     })
   })
 
@@ -625,6 +678,7 @@ export function buildBilanPatrimoineReport(params: {
   operations: OperationBasic[]
   internalAccounts: CompteInterneBasic[]
   technicalAccounts: CompteTechniqueBasic[]
+  evaluations?: EvaluationBasic[]
   dateDebut: string
   dateFin: string
   codeTypePeriode?: MonatisPeriodCode
@@ -660,8 +714,8 @@ export function buildBilanPatrimoineReport(params: {
           operation.dateValeur >= account.dateSoldeInitial,
       )
 
-      const initial = computeBalanceAtDate(account, params.operations, dayBefore(period.start))
-      const final = computeBalanceAtDate(account, params.operations, period.end)
+      const initial = computeBalanceAtDate(account, params.operations, dayBefore(period.start), params.evaluations ?? [])
+      const final = computeBalanceAtDate(account, params.operations, period.end, params.evaluations ?? [])
 
       const totalRecette = roundMoney(
         periodOperations
@@ -702,7 +756,9 @@ export function buildBilanPatrimoineReport(params: {
       identifiant: account.identifiant,
       libelle: account.libelle,
       banque: account.nomBanque,
-      montantSoldeInitialEnEuros: roundMoney(computeBalanceAtDate(account, params.operations, dayBefore(params.dateDebut))),
+      montantSoldeInitialEnEuros: roundMoney(
+        computeBalanceAtDate(account, params.operations, dayBefore(params.dateDebut), params.evaluations ?? []),
+      ),
       periods: accountPeriods,
     }
 

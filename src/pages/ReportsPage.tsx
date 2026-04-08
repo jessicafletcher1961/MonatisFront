@@ -1,9 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
-import { BarChart3, Check, ChevronDown, Landmark, ListFilter, PiggyBank, Search, Wallet } from 'lucide-react'
-import { useDeferredValue, useMemo, useState } from 'react'
+import { BarChart3, Check, ChevronDown, ChevronRight, Landmark, ListFilter, PiggyBank, Search, Wallet } from 'lucide-react'
+import type { ReactNode } from 'react'
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Badge, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, SectionHeader, Surface } from '../components/ui'
 import { cx } from '../lib/cx'
+import { formatCurrency, formatDate, todayIso, type MonatisPeriodCode } from '../lib/format'
 import { apiErrorMessage, monatisApi } from '../lib/monatis-api'
 import {
   buildAccountLookup,
@@ -14,14 +16,14 @@ import {
   buildResumesComptes,
   describePeriod,
 } from '../lib/reporting'
-import { formatCurrency, formatDate, todayIso, type MonatisPeriodCode } from '../lib/format'
 
 type ReportTab = 'releve' | 'resumes' | 'depense' | 'remunerations' | 'bilan'
 type PeriodSelectValue = Exclude<MonatisPeriodCode, null | undefined>
+type ReleveMode = 'both' | 'recettes' | 'depenses'
 
 const reportTabs: Array<{ value: ReportTab; label: string; icon: typeof Landmark }> = [
   { value: 'releve', label: 'Releve', icon: Landmark },
-  { value: 'resumes', label: 'Resumes', icon: Wallet },
+  { value: 'resumes', label: 'Resume', icon: Wallet },
   { value: 'depense', label: 'Depenses / recettes', icon: ListFilter },
   { value: 'remunerations', label: 'Remunerations / frais', icon: BarChart3 },
   { value: 'bilan', label: 'Bilan patrimoine', icon: PiggyBank },
@@ -40,8 +42,133 @@ function toggleValue(values: string[], nextValue: string): string[] {
   return values.includes(nextValue) ? values.filter((value) => value !== nextValue) : [...values, nextValue]
 }
 
+function isSectionOpen(state: Record<string, boolean>, key: string): boolean {
+  return state[key] ?? false
+}
+
+function toggleSectionState(state: Record<string, boolean>, key: string): Record<string, boolean> {
+  return {
+    ...state,
+    [key]: !(state[key] ?? false),
+  }
+}
+
+function sumPeriodSolde(periods: Array<{ solde: number }>): number {
+  return periods.reduce((total, period) => total + period.solde, 0)
+}
+
+function safeTrailingValue(periods: Array<{ montantSoldeFinalEnEuros: number }>): number {
+  return periods.length ? periods[periods.length - 1].montantSoldeFinalEnEuros : 0
+}
+
+function reportCellLabel(recette: number, depense: number, depenseLabel = 'D'): string {
+  return `R ${formatCurrency(recette)} / ${depenseLabel} ${formatCurrency(depense)}`
+}
+
+function HoverDetailsCard({
+  title,
+  subtitle,
+  items,
+}: {
+  title: string
+  subtitle?: string
+  items: Array<{ primary: string; secondary?: string; amount?: string }>
+}) {
+  return (
+    <div className="report-hover-card">
+      <div className="report-hover-head">
+        <strong>{title}</strong>
+        {subtitle ? <span>{subtitle}</span> : null}
+      </div>
+      <div className="report-hover-list">
+        {items.map((item, index) => (
+          <div key={`${item.primary}-${index}`} className="report-hover-item">
+            <div>
+              <strong>{item.primary}</strong>
+              {item.secondary ? <span>{item.secondary}</span> : null}
+            </div>
+            {item.amount ? <span>{item.amount}</span> : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function InlinePeriodTotals({
+  items,
+}: {
+  items: Array<{ label: string; summary: string }>
+}) {
+  return (
+    <div className="report-inline-summary">
+      {items.map((item) => (
+        <div key={item.label} className="report-inline-summary-item">
+          <strong>{item.label}</strong>
+          <span>{item.summary}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function CollapsibleReportSection({
+  title,
+  aside,
+  open,
+  onToggle,
+  children,
+}: {
+  title: string
+  aside?: ReactNode
+  open: boolean
+  onToggle: () => void
+  children: ReactNode
+}) {
+  const sectionRef = useRef<HTMLDivElement | null>(null)
+  const mountedRef = useRef(false)
+
+  useEffect(() => {
+    if (!mountedRef.current) {
+      mountedRef.current = true
+      return
+    }
+
+    if (!open) {
+      return
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      sectionRef.current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      })
+    })
+
+    return () => window.cancelAnimationFrame(frame)
+  }, [open])
+
+  return (
+    <Surface className="report-section">
+      <div ref={sectionRef}>
+        <button type="button" className="report-section-toggle" onClick={onToggle}>
+          <div className="report-section-heading">
+            <div className="report-section-title">
+              <ChevronRight size={15} className={cx(open && 'open')} />
+              <strong>{title}</strong>
+            </div>
+            {aside ? <div className="report-section-aside">{aside}</div> : null}
+          </div>
+        </button>
+        {open ? <div className="report-section-body">{children}</div> : null}
+      </div>
+    </Surface>
+  )
+}
+
 export function ReportsPage() {
   const [tab, setTab] = useState<ReportTab>('releve')
+  const [releveMode, setReleveMode] = useState<ReleveMode>('both')
 
   const [releveAccountId, setReleveAccountId] = useState('')
   const [releveStart, setReleveStart] = useState(todayIso())
@@ -74,6 +201,21 @@ export function ReportsPage() {
   const [bilanTypes, setBilanTypes] = useState<string[]>([])
   const [bilanAccounts, setBilanAccounts] = useState<string[]>([])
   const [bilanTitulaire, setBilanTitulaire] = useState('')
+
+  const [resumeSections, setResumeSections] = useState<Record<string, boolean>>({})
+  const [depenseSections, setDepenseSections] = useState<Record<string, boolean>>({})
+  const [remSections, setRemSections] = useState<Record<string, boolean>>({})
+  const [bilanSections, setBilanSections] = useState<Record<string, boolean>>({})
+
+  function selectTab(nextTab: ReportTab) {
+    setResumeSections({})
+    setDepenseSections({})
+    setRemSections({})
+    setBilanSections({})
+    setReleveMode('both')
+    setTab(nextTab)
+  }
+
   const deferredDepenseSousCategoriesSearch = useDeferredValue(depenseSousCategoriesSearch)
 
   const internalAccountsQuery = useQuery({
@@ -94,6 +236,11 @@ export function ReportsPage() {
   const operationsQuery = useQuery({
     queryKey: ['operations'],
     queryFn: () => monatisApi.listOperations(),
+  })
+
+  const evaluationsQuery = useQuery({
+    queryKey: ['evaluations'],
+    queryFn: () => monatisApi.listEvaluations(),
   })
 
   const categoriesQuery = useQuery({
@@ -121,6 +268,7 @@ export function ReportsPage() {
     externalAccountsQuery.isLoading ||
     technicalAccountsQuery.isLoading ||
     operationsQuery.isLoading ||
+    evaluationsQuery.isLoading ||
     categoriesQuery.isLoading ||
     sousCategoriesQuery.isLoading ||
     beneficiairesQuery.isLoading ||
@@ -131,14 +279,16 @@ export function ReportsPage() {
     externalAccountsQuery.error ||
     technicalAccountsQuery.error ||
     operationsQuery.error ||
+    evaluationsQuery.error ||
     categoriesQuery.error ||
     sousCategoriesQuery.error ||
     beneficiairesQuery.error ||
     titulairesQuery.error
 
+  const effectiveReleveAccountId = releveAccountId || internalAccountsQuery.data?.[0]?.identifiant || ''
   const selectedReleveAccount = useMemo(
-    () => (internalAccountsQuery.data ?? []).find((account) => account.identifiant === releveAccountId) ?? null,
-    [internalAccountsQuery.data, releveAccountId],
+    () => (internalAccountsQuery.data ?? []).find((account) => account.identifiant === effectiveReleveAccountId) ?? null,
+    [effectiveReleveAccountId, internalAccountsQuery.data],
   )
 
   const accountLookup = useMemo(() => {
@@ -150,15 +300,22 @@ export function ReportsPage() {
   }, [externalAccountsQuery.data, internalAccountsQuery.data, technicalAccountsQuery.data])
 
   const releve = useMemo(() => {
-    if (!selectedReleveAccount || !operationsQuery.data || !accountLookup) {
+    if (!selectedReleveAccount || !operationsQuery.data || !accountLookup || !releveStart || !releveEnd) {
       return null
     }
 
-    return buildReleveCompte(selectedReleveAccount, operationsQuery.data, accountLookup, releveStart, releveEnd)
-  }, [accountLookup, operationsQuery.data, releveEnd, releveStart, selectedReleveAccount])
+    return buildReleveCompte(
+      selectedReleveAccount,
+      operationsQuery.data,
+      accountLookup,
+      releveStart,
+      releveEnd,
+      evaluationsQuery.data ?? [],
+    )
+  }, [accountLookup, evaluationsQuery.data, operationsQuery.data, releveEnd, releveStart, selectedReleveAccount])
 
   const resumes = useMemo(() => {
-    if (!internalAccountsQuery.data || !operationsQuery.data) {
+    if (!internalAccountsQuery.data || !operationsQuery.data || !resumeDate) {
       return []
     }
 
@@ -168,11 +325,27 @@ export function ReportsPage() {
       resumeDate,
       resumeType ? [resumeType] : undefined,
       resumeAccounts.length ? resumeAccounts : undefined,
+      evaluationsQuery.data ?? [],
     )
-  }, [internalAccountsQuery.data, operationsQuery.data, resumeAccounts, resumeDate, resumeType])
+  }, [evaluationsQuery.data, internalAccountsQuery.data, operationsQuery.data, resumeAccounts, resumeDate, resumeType])
+
+  const resumeGroups = useMemo(() => {
+    const groups = new Map<string, typeof resumes>()
+    resumes.forEach((row) => {
+      groups.set(row.typeFonctionnement, [...(groups.get(row.typeFonctionnement) ?? []), row])
+    })
+
+    return Array.from(groups.entries())
+      .map(([type, accounts]) => ({
+        type,
+        accounts: [...accounts].sort((left, right) => left.identifiant.localeCompare(right.identifiant)),
+        total: accounts.reduce((sum, account) => sum + account.montantSoldeEnEuros, 0),
+      }))
+      .sort((left, right) => left.type.localeCompare(right.type))
+  }, [resumes])
 
   const depenseReport = useMemo(() => {
-    if (!operationsQuery.data || !internalAccountsQuery.data || !categoriesQuery.data || !sousCategoriesQuery.data) {
+    if (!operationsQuery.data || !internalAccountsQuery.data || !categoriesQuery.data || !sousCategoriesQuery.data || !depenseStart || !depenseEnd) {
       return null
     }
 
@@ -235,7 +408,7 @@ export function ReportsPage() {
   }, [categoriesQuery.data, sousCategoriesQuery.data])
 
   const remunerationReport = useMemo(() => {
-    if (!operationsQuery.data || !internalAccountsQuery.data) {
+    if (!operationsQuery.data || !internalAccountsQuery.data || !remStart || !remEnd) {
       return null
     }
 
@@ -252,7 +425,7 @@ export function ReportsPage() {
   }, [internalAccountsQuery.data, operationsQuery.data, remAccounts, remEnd, remPeriod, remStart, remTitulaire, remTypes])
 
   const bilanReport = useMemo(() => {
-    if (!operationsQuery.data || !internalAccountsQuery.data || !technicalAccountsQuery.data) {
+    if (!operationsQuery.data || !internalAccountsQuery.data || !technicalAccountsQuery.data || !bilanStart || !bilanEnd) {
       return null
     }
 
@@ -260,6 +433,7 @@ export function ReportsPage() {
       operations: operationsQuery.data,
       internalAccounts: internalAccountsQuery.data,
       technicalAccounts: technicalAccountsQuery.data,
+      evaluations: evaluationsQuery.data ?? [],
       dateDebut: bilanStart,
       dateFin: bilanEnd,
       codeTypePeriode: bilanPeriod,
@@ -274,6 +448,7 @@ export function ReportsPage() {
     bilanStart,
     bilanTitulaire,
     bilanTypes,
+    evaluationsQuery.data,
     internalAccountsQuery.data,
     operationsQuery.data,
     technicalAccountsQuery.data,
@@ -292,37 +467,29 @@ export function ReportsPage() {
 
   return (
     <div className="page-stack">
-      <PageHeader
-        eyebrow="Analyse"
-        title="Rapports"
-        subtitle="Vues locales."
-        actions={<Badge tone="warning">Local</Badge>}
-      />
+      <PageHeader eyebrow="Analyse" title="Analyse" />
 
-      {loading ? <LoadingState label="Preparation des rapports..." /> : null}
+      {loading ? <LoadingState label="Preparation des analyses..." /> : null}
       {error ? <ErrorState message={apiErrorMessage(error)} /> : null}
 
       <FilterBar>
         <div className="tab-bar">
-          {reportTabs.map(({ value, label, icon: Icon }) => {
-            return (
-              <button key={value} className={`tab-button ${tab === value ? 'active' : ''}`} onClick={() => setTab(value)}>
-                <Icon size={16} />
-                <span>{label}</span>
-              </button>
-            )
-          })}
+          {reportTabs.map(({ value, label, icon: Icon }) => (
+            <button key={value} className={cx('tab-button', tab === value && 'active')} onClick={() => selectTab(value)}>
+              <Icon size={16} />
+              <span>{label}</span>
+            </button>
+          ))}
         </div>
       </FilterBar>
 
       {tab === 'releve' ? (
-        <div className="page-stack">
+        <div className="page-stack releve-page-stack">
           <Surface className="editor-panel">
-            <SectionHeader title="Filtre du releve" subtitle="Version V1 centree sur les comptes internes." />
             <div className="form-grid three-columns">
               <FormField label="Compte">
-                <select value={releveAccountId} onChange={(event) => setReleveAccountId(event.target.value)}>
-                  <option value="">Choisir un compte interne</option>
+                <select value={effectiveReleveAccountId} onChange={(event) => setReleveAccountId(event.target.value)}>
+                  <option value="">Choisir</option>
                   {(internalAccountsQuery.data ?? []).map((account) => (
                     <option key={account.identifiant} value={account.identifiant}>
                       {account.identifiant}
@@ -330,46 +497,52 @@ export function ReportsPage() {
                   ))}
                 </select>
               </FormField>
-              <FormField label="Date debut">
+              <FormField label="Debut">
                 <input type="date" value={releveStart} onChange={(event) => setReleveStart(event.target.value)} />
               </FormField>
-              <FormField label="Date fin">
+              <FormField label="Fin">
                 <input type="date" value={releveEnd} onChange={(event) => setReleveEnd(event.target.value)} />
               </FormField>
             </div>
           </Surface>
 
           {!releve ? (
-            <EmptyState title="Choisis un compte interne" description="Le releve se genere des qu un compte est selectionne." />
+            <EmptyState title="Choisis un compte" description="Le releve apparait des qu un compte interne et une plage valide sont choisis." />
           ) : (
             <>
-              <div className="stat-grid">
-                <Surface className="stat-card">
+              <div className="stat-grid releve-stat-grid">
+                <Surface className="stat-card stat-card-compact">
                   <span className="eyebrow">Solde debut</span>
                   <strong>{formatCurrency(releve.montantSoldeDebutReleveEnEuros)}</strong>
                   <p>{describePeriod({ key: '', label: '', start: releve.dateDebutReleve, end: releve.dateDebutReleve })}</p>
                 </Surface>
-                <Surface className="stat-card">
-                  <span className="eyebrow">Total recettes</span>
+                <Surface className="stat-card stat-card-compact">
+                  <span className="eyebrow">Recettes</span>
                   <strong>{formatCurrency(releve.montantTotalOperationsRecetteEnEuros)}</strong>
-                  <p>{releve.operationsRecette.length} ligne(s)</p>
+                  <p>{releve.operationsRecette.length} operation(s)</p>
                 </Surface>
-                <Surface className="stat-card">
-                  <span className="eyebrow">Total depenses</span>
+                <Surface className="stat-card stat-card-compact">
+                  <span className="eyebrow">Depenses</span>
                   <strong>{formatCurrency(releve.montantTotalOperationsDepenseEnEuros)}</strong>
-                  <p>{releve.operationsDepense.length} ligne(s)</p>
+                  <p>{releve.operationsDepense.length} operation(s)</p>
                 </Surface>
-                <Surface className="stat-card">
+                <Surface className="stat-card stat-card-compact">
                   <span className="eyebrow">Solde fin</span>
                   <strong>{formatCurrency(releve.montantSoldeFinReleveEnEuros)}</strong>
-                  <p>Ecart : {formatCurrency(releve.montantEcartEnEuros)}</p>
+                  <p>Ecart {formatCurrency(releve.montantEcartEnEuros)}</p>
                 </Surface>
               </div>
 
-              <Surface className="data-panel">
-                <SectionHeader title={releve.enteteCompte.identifiant} subtitle={releve.enteteCompte.libelle ?? 'Sans libelle'} />
-                <div className="pill-list">
-                  <Badge>{releve.enteteCompte.typeFonctionnement ?? 'INTERNE'}</Badge>
+              <Surface className="data-panel report-panel releve-account-panel">
+                <div className="releve-account-head">
+                  <div className="releve-account-copy">
+                    <strong>{releve.enteteCompte.identifiant}</strong>
+                    <span>{releve.enteteCompte.typeFonctionnement ?? 'INTERNE'}</span>
+                  </div>
+                  <Badge>{formatCurrency(releve.montantSoldeFinReleveEnEuros)}</Badge>
+                </div>
+                <div className="pill-list releve-account-pills">
+                  {releve.enteteCompte.libelle ? <Badge>{releve.enteteCompte.libelle}</Badge> : null}
                   {releve.enteteCompte.banque ? <Badge>{releve.enteteCompte.banque}</Badge> : null}
                   {(releve.enteteCompte.titulaires ?? []).map((item) => (
                     <Badge key={item}>{item}</Badge>
@@ -377,49 +550,106 @@ export function ReportsPage() {
                 </div>
               </Surface>
 
-              <div className="card-grid two-columns">
-                <Surface className="data-panel">
-                  <SectionHeader title="Recettes" subtitle="Operations qui augmentent le solde du compte." />
-                  {!releve.operationsRecette.length ? (
-                    <EmptyState title="Aucune recette" description="Aucun mouvement de recette sur la plage demandee." />
-                  ) : (
-                    <div className="stacked-cards">
-                      {releve.operationsRecette.map((row) => (
-                        <div key={row.numero} className="mini-card">
-                          <div>
-                            <strong>{row.libelle ?? row.numero}</strong>
-                            <p>
-                              {formatDate(row.dateValeur)} · {row.identifiantAutreCompte}
-                            </p>
-                          </div>
-                          <Badge tone="success">{formatCurrency(row.montantEnEuros)}</Badge>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </Surface>
+              <Surface className="data-panel report-panel releve-flow-panel">
+                <div className="releve-flow-head">
+                  <div className="report-switch-row releve-switch-row">
+                    <button
+                      type="button"
+                      className={cx('report-switch-chip', 'releve-switch-chip', 'left', releveMode !== 'depenses' && 'active')}
+                      onClick={() => setReleveMode((current) => (current === 'recettes' ? 'both' : 'recettes'))}
+                    >
+                      Recettes
+                    </button>
+                    <button
+                      type="button"
+                      className={cx('report-switch-chip', 'releve-switch-chip', 'right', releveMode !== 'recettes' && 'active')}
+                      onClick={() => setReleveMode((current) => (current === 'depenses' ? 'both' : 'depenses'))}
+                    >
+                      Depenses
+                    </button>
+                  </div>
+                </div>
 
-                <Surface className="data-panel">
-                  <SectionHeader title="Depenses" subtitle="Operations qui diminuent le solde du compte." />
-                  {!releve.operationsDepense.length ? (
-                    <EmptyState title="Aucune depense" description="Aucun mouvement de depense sur la plage demandee." />
-                  ) : (
-                    <div className="stacked-cards">
-                      {releve.operationsDepense.map((row) => (
-                        <div key={row.numero} className="mini-card">
-                          <div>
-                            <strong>{row.libelle ?? row.numero}</strong>
-                            <p>
-                              {formatDate(row.dateValeur)} · {row.identifiantAutreCompte}
-                            </p>
+                <div className={cx('report-split-grid releve-split-grid', releveMode !== 'both' && 'single', releveMode === 'both' && 'dual')}>
+                  {releveMode !== 'depenses' ? (
+                    <div className="releve-flow-column">
+                      <div className="releve-flow-meta">
+                        <Badge tone="success">{formatCurrency(releve.montantTotalOperationsRecetteEnEuros)}</Badge>
+                        <span>{releve.operationsRecette.length} operation(s)</span>
+                      </div>
+                    {!releve.operationsRecette.length ? (
+                      <EmptyState title="Aucune recette" description="Aucun mouvement sur cette plage." />
+                    ) : (
+                      <div className="report-hover-list-grid dense">
+                        {releve.operationsRecette.map((row) => (
+                          <div key={`releve-r-${row.numero}`} className="report-hover-wrap">
+                            <div className="report-line-card">
+                              <div>
+                                <strong>{row.libelle ?? row.numero}</strong>
+                                <span>
+                                  {formatDate(row.dateValeur)} · {row.identifiantAutreCompte}
+                                </span>
+                              </div>
+                              <Badge tone="success">{formatCurrency(row.montantEnEuros)}</Badge>
+                            </div>
+                            <HoverDetailsCard
+                              title={row.numero}
+                              subtitle={row.codeTypeOperation}
+                              items={[
+                                {
+                                  primary: row.identifiantAutreCompte,
+                                  secondary: row.libelleAutreCompte ?? undefined,
+                                  amount: formatCurrency(row.montantEnEuros),
+                                },
+                              ]}
+                            />
                           </div>
-                          <Badge>{formatCurrency(row.montantEnEuros)}</Badge>
-                        </div>
-                      ))}
+                        ))}
+                      </div>
+                    )}
                     </div>
-                  )}
-                </Surface>
-              </div>
+                  ) : null}
+
+                  {releveMode !== 'recettes' ? (
+                    <div className="releve-flow-column">
+                      <div className="releve-flow-meta">
+                        <Badge>{formatCurrency(releve.montantTotalOperationsDepenseEnEuros)}</Badge>
+                        <span>{releve.operationsDepense.length} operation(s)</span>
+                      </div>
+                    {!releve.operationsDepense.length ? (
+                      <EmptyState title="Aucune depense" description="Aucun mouvement sur cette plage." />
+                    ) : (
+                      <div className="report-hover-list-grid dense">
+                        {releve.operationsDepense.map((row) => (
+                          <div key={`releve-d-${row.numero}`} className="report-hover-wrap">
+                            <div className="report-line-card">
+                              <div>
+                                <strong>{row.libelle ?? row.numero}</strong>
+                                <span>
+                                  {formatDate(row.dateValeur)} · {row.identifiantAutreCompte}
+                                </span>
+                              </div>
+                              <Badge>{formatCurrency(row.montantEnEuros)}</Badge>
+                            </div>
+                            <HoverDetailsCard
+                              title={row.numero}
+                              subtitle={row.codeTypeOperation}
+                              items={[
+                                {
+                                  primary: row.identifiantAutreCompte,
+                                  secondary: row.libelleAutreCompte ?? undefined,
+                                  amount: formatCurrency(row.montantEnEuros),
+                                },
+                              ]}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    </div>
+                  ) : null}
+                </div>
+              </Surface>
             </>
           )}
         </div>
@@ -428,14 +658,13 @@ export function ReportsPage() {
       {tab === 'resumes' ? (
         <div className="page-stack">
           <Surface className="editor-panel">
-            <SectionHeader title="Filtre des resumes" subtitle="Selection multiple de comptes et filtre de type optionnel." />
             <div className="form-grid three-columns">
-              <FormField label="Date de solde">
+              <FormField label="Date">
                 <input type="date" value={resumeDate} onChange={(event) => setResumeDate(event.target.value)} />
               </FormField>
-              <FormField label="Type de fonctionnement">
+              <FormField label="Type">
                 <select value={resumeType} onChange={(event) => setResumeType(event.target.value)}>
-                  <option value="">Tous les types</option>
+                  <option value="">Tous</option>
                   {(internalAccountsQuery.data ?? [])
                     .map((item) => item.codeTypeFonctionnement)
                     .filter((value, index, array) => array.indexOf(value) === index)
@@ -451,7 +680,7 @@ export function ReportsPage() {
               {(internalAccountsQuery.data ?? []).map((account) => {
                 const checked = resumeAccounts.includes(account.identifiant)
                 return (
-                  <label key={account.identifiant} className={`toggle-chip ${checked ? 'checked' : ''}`}>
+                  <label key={account.identifiant} className={cx('toggle-chip', checked && 'checked')}>
                     <input type="checkbox" checked={checked} onChange={() => setResumeAccounts((current) => toggleValue(current, account.identifiant))} />
                     <span>{account.identifiant}</span>
                   </label>
@@ -460,36 +689,53 @@ export function ReportsPage() {
             </div>
           </Surface>
 
-          {!resumes.length ? (
-            <EmptyState title="Aucun resume disponible" description="Ajuste les filtres ou cree des comptes internes pour alimenter cette vue." />
+          {!resumeGroups.length ? (
+            <EmptyState title="Aucun resume" description="Ajuste les filtres ou choisis une date valide." />
           ) : (
-            <Surface className="data-panel">
-              <SectionHeader title="Resumes de comptes" subtitle={`${resumes.length} compte(s) analyses pour la date ${formatDate(resumeDate)}.`} />
-              <div className="table-wrapper">
-                <table className="report-table">
-                  <thead>
-                    <tr>
-                      <th>Compte</th>
-                      <th>Type</th>
-                      <th>Banque</th>
-                      <th>Titulaires</th>
-                      <th>Solde</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {resumes.map((row) => (
-                      <tr key={row.identifiant}>
-                        <td>{row.identifiant}</td>
-                        <td>{row.typeFonctionnement}</td>
-                        <td>{row.banque ?? 'Aucune'}</td>
-                        <td>{row.titulaires.join(', ') || 'Aucun'}</td>
-                        <td>{formatCurrency(row.montantSoldeEnEuros)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </Surface>
+            <>
+              <Surface className="data-panel">
+                <SectionHeader title="Total" aside={<Badge>{formatCurrency(resumes.reduce((sum, row) => sum + row.montantSoldeEnEuros, 0))}</Badge>} />
+              </Surface>
+
+              {resumeGroups.map((group) => (
+                <CollapsibleReportSection
+                  key={group.type}
+                  title={group.type}
+                  aside={<Badge>{formatCurrency(group.total)}</Badge>}
+                  open={isSectionOpen(resumeSections, group.type)}
+                  onToggle={() => setResumeSections((current) => toggleSectionState(current, group.type))}
+                >
+                  <div className="table-wrapper">
+                    <table className="report-table">
+                      <thead>
+                        <tr>
+                          <th>Compte</th>
+                          <th>Banque</th>
+                          <th>Titulaires</th>
+                          <th>Solde</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {group.accounts.map((row) => (
+                          <tr key={row.identifiant}>
+                            <td>{row.identifiant}</td>
+                            <td>{row.banque ?? 'Aucune'}</td>
+                            <td>{row.titulaires.join(', ') || 'Aucun'}</td>
+                            <td>{formatCurrency(row.montantSoldeEnEuros)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot>
+                        <tr>
+                          <td colSpan={3}>Total</td>
+                          <td>{formatCurrency(group.total)}</td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                </CollapsibleReportSection>
+              ))}
+            </>
           )}
         </div>
       ) : null}
@@ -497,12 +743,11 @@ export function ReportsPage() {
       {tab === 'depense' ? (
         <div className="page-stack">
           <Surface className="editor-panel">
-            <SectionHeader title="Filtres depenses / recettes" subtitle="Analyse par categorie, sous-categorie et periode." />
             <div className="form-grid three-columns">
-              <FormField label="Date debut">
+              <FormField label="Debut">
                 <input type="date" value={depenseStart} onChange={(event) => setDepenseStart(event.target.value)} />
               </FormField>
-              <FormField label="Date fin">
+              <FormField label="Fin">
                 <input type="date" value={depenseEnd} onChange={(event) => setDepenseEnd(event.target.value)} />
               </FormField>
               <FormField label="Periode">
@@ -516,7 +761,7 @@ export function ReportsPage() {
               </FormField>
               <FormField label="Beneficiaire">
                 <select value={depenseBeneficiaire} onChange={(event) => setDepenseBeneficiaire(event.target.value)}>
-                  <option value="">Tous les beneficiaires</option>
+                  <option value="">Tous</option>
                   {(beneficiairesQuery.data ?? []).map((item) => (
                     <option key={item.nom} value={item.nom}>
                       {item.nom}
@@ -532,7 +777,7 @@ export function ReportsPage() {
                 {(categoriesQuery.data ?? []).map((item) => {
                   const checked = depenseCategories.includes(item.nom)
                   return (
-                    <label key={item.nom} className={`toggle-chip ${checked ? 'checked' : ''}`}>
+                    <label key={item.nom} className={cx('toggle-chip', checked && 'checked')}>
                       <input type="checkbox" checked={checked} onChange={() => setDepenseCategories((current) => toggleValue(current, item.nom))} />
                       <span>{item.nom}</span>
                     </label>
@@ -549,6 +794,7 @@ export function ReportsPage() {
                 onClick={() => {
                   setDepenseSousCategoriesOpen(true)
                   setDepenseSousCategoriesSearch('')
+                  setDepenseOpenCategoryNames([])
                 }}
               >
                 <div className="picker-field-content">
@@ -561,7 +807,7 @@ export function ReportsPage() {
                       ))}
                     </div>
                   ) : (
-                    <span>Choisir des sous-categories</span>
+                    <span>Choisir</span>
                   )}
                 </div>
                 <ChevronDown size={16} />
@@ -570,18 +816,30 @@ export function ReportsPage() {
           </Surface>
 
           {!depenseReport || !depenseReport.categories.length ? (
-            <EmptyState title="Aucune donnee sur la plage choisie" description="Ajuste les filtres ou enrichis les operations recuperees depuis le back." />
+            <EmptyState title="Aucune donnee" description="Ajuste les filtres ou choisis une plage valide." />
           ) : (
-            <Surface className="data-panel">
-              <SectionHeader title="Etat depenses / recettes" subtitle={`${depenseReport.categories.length} categorie(s) visibles.`} />
-              <div className="page-stack">
-                {depenseReport.categories.map((category) => (
-                  <Surface key={category.categorie?.nom ?? 'none'} className="nested-panel">
-                    <SectionHeader
-                      title={category.categorie?.nom ?? 'Sans categorie'}
-                      subtitle={category.categorie?.libelle ?? 'Categorie implicite de secours'}
-                    />
-                    <div className="table-wrapper">
+            <>
+              <Surface className="data-panel report-panel">
+                <SectionHeader title="Totaux" />
+                <InlinePeriodTotals
+                  items={depenseReport.totals.map((period) => ({
+                    label: period.label,
+                    summary: `R ${formatCurrency(period.recette)} · D ${formatCurrency(period.depense)} · S ${formatCurrency(period.solde)}`,
+                  }))}
+                />
+              </Surface>
+
+              {depenseReport.categories.map((category) => {
+                const key = category.categorie?.nom ?? 'Sans categorie'
+                return (
+                  <CollapsibleReportSection
+                    key={key}
+                    title={key}
+                    aside={<Badge>{formatCurrency(sumPeriodSolde(category.totals))}</Badge>}
+                    open={isSectionOpen(depenseSections, key)}
+                    onToggle={() => setDepenseSections((current) => toggleSectionState(current, key))}
+                  >
+                    <div className="table-wrapper report-table-soft">
                       <table className="report-table">
                         <thead>
                           <tr>
@@ -597,21 +855,42 @@ export function ReportsPage() {
                               <td>{child.sousCategorie?.nom ?? 'Sans sous-categorie'}</td>
                               {child.periods.map((period) => (
                                 <td key={`${child.sousCategorie?.nom}_${period.start}`}>
-                                  {formatCurrency(period.solde)}
-                                  <div className="cell-subline">
-                                    R {formatCurrency(period.recette)} / D {formatCurrency(period.depense)}
+                                  <div className="report-hover-wrap table-cell-hover">
+                                    <div className="report-cell-main">
+                                      <strong>{formatCurrency(period.solde)}</strong>
+                                      <span className="cell-subline">{reportCellLabel(period.recette, period.depense)}</span>
+                                    </div>
+                                    {period.details.length ? (
+                                      <HoverDetailsCard
+                                        title={child.sousCategorie?.nom ?? 'Sans sous-categorie'}
+                                        subtitle={describePeriod({ key: '', label: '', start: period.start, end: period.end })}
+                                        items={period.details.map((item) => ({
+                                          primary: item.libelle ?? item.numero,
+                                          secondary: `${formatDate(item.date)}${item.beneficiaires.length ? ` · ${item.beneficiaires.join(', ')}` : ''}`,
+                                          amount: formatCurrency(item.montantEnEuros),
+                                        }))}
+                                      />
+                                    ) : null}
                                   </div>
                                 </td>
                               ))}
                             </tr>
                           ))}
                         </tbody>
+                        <tfoot>
+                          <tr>
+                            <td>Total</td>
+                            {category.totals.map((period) => (
+                              <td key={`${key}-${period.start}`}>{formatCurrency(period.solde)}</td>
+                            ))}
+                          </tr>
+                        </tfoot>
                       </table>
                     </div>
-                  </Surface>
-                ))}
-              </div>
-            </Surface>
+                  </CollapsibleReportSection>
+                )
+              })}
+            </>
           )}
         </div>
       ) : null}
@@ -621,6 +900,7 @@ export function ReportsPage() {
         onClose={() => {
           setDepenseSousCategoriesOpen(false)
           setDepenseSousCategoriesSearch('')
+          setDepenseOpenCategoryNames([])
         }}
         title="Sous-categories"
         width="regular"
@@ -629,16 +909,12 @@ export function ReportsPage() {
         <div className="page-stack">
           <label className="search-field search-field-thin">
             <Search size={14} />
-            <input
-              value={depenseSousCategoriesSearch}
-              onChange={(event) => setDepenseSousCategoriesSearch(event.target.value)}
-              placeholder="Chercher une sous-categorie..."
-            />
+            <input value={depenseSousCategoriesSearch} onChange={(event) => setDepenseSousCategoriesSearch(event.target.value)} placeholder="Chercher..." />
           </label>
 
           {deferredDepenseSousCategoriesSearch ? (
             !filteredDepenseSousCategories.length ? (
-              <EmptyState title="Aucune sous-categorie" description="Aucun resultat pour cette recherche." />
+              <EmptyState title="Aucune sous-categorie" description="Aucun resultat." />
             ) : (
               <div className="picker-option-list">
                 {filteredDepenseSousCategories.map((item) => {
@@ -704,12 +980,11 @@ export function ReportsPage() {
       {tab === 'remunerations' ? (
         <div className="page-stack">
           <Surface className="editor-panel">
-            <SectionHeader title="Filtres remunerations / frais" subtitle="Vue par type de fonctionnement puis par compte." />
             <div className="form-grid three-columns">
-              <FormField label="Date debut">
+              <FormField label="Debut">
                 <input type="date" value={remStart} onChange={(event) => setRemStart(event.target.value)} />
               </FormField>
-              <FormField label="Date fin">
+              <FormField label="Fin">
                 <input type="date" value={remEnd} onChange={(event) => setRemEnd(event.target.value)} />
               </FormField>
               <FormField label="Periode">
@@ -723,7 +998,7 @@ export function ReportsPage() {
               </FormField>
               <FormField label="Titulaire">
                 <select value={remTitulaire} onChange={(event) => setRemTitulaire(event.target.value)}>
-                  <option value="">Tous les titulaires</option>
+                  <option value="">Tous</option>
                   {(titulairesQuery.data ?? []).map((item) => (
                     <option key={item.nom} value={item.nom}>
                       {item.nom}
@@ -734,7 +1009,7 @@ export function ReportsPage() {
             </div>
 
             <div className="form-field">
-              <span className="form-field-label">Types de fonctionnement</span>
+              <span className="form-field-label">Types</span>
               <div className="checkbox-grid">
                 {(internalAccountsQuery.data ?? [])
                   .map((item) => item.codeTypeFonctionnement)
@@ -742,7 +1017,7 @@ export function ReportsPage() {
                   .map((value) => {
                     const checked = remTypes.includes(value)
                     return (
-                      <label key={value} className={`toggle-chip ${checked ? 'checked' : ''}`}>
+                      <label key={value} className={cx('toggle-chip', checked && 'checked')}>
                         <input type="checkbox" checked={checked} onChange={() => setRemTypes((current) => toggleValue(current, value))} />
                         <span>{value}</span>
                       </label>
@@ -752,12 +1027,12 @@ export function ReportsPage() {
             </div>
 
             <div className="form-field">
-              <span className="form-field-label">Comptes internes</span>
+              <span className="form-field-label">Comptes</span>
               <div className="checkbox-grid">
                 {(internalAccountsQuery.data ?? []).map((item) => {
                   const checked = remAccounts.includes(item.identifiant)
                   return (
-                    <label key={item.identifiant} className={`toggle-chip ${checked ? 'checked' : ''}`}>
+                    <label key={item.identifiant} className={cx('toggle-chip', checked && 'checked')}>
                       <input type="checkbox" checked={checked} onChange={() => setRemAccounts((current) => toggleValue(current, item.identifiant))} />
                       <span>{item.identifiant}</span>
                     </label>
@@ -768,45 +1043,63 @@ export function ReportsPage() {
           </Surface>
 
           {!remunerationReport || !remunerationReport.groups.length ? (
-            <EmptyState title="Aucune remuneration ou frais sur cette plage" description="Elargis la plage ou verifie les types d operations presents dans MONATIS." />
+            <EmptyState title="Aucune donnee" description="Ajuste les filtres ou la plage." />
           ) : (
-            <Surface className="data-panel">
-              <SectionHeader title="Etat remunerations / frais" subtitle={`${remunerationReport.groups.length} groupe(s) de comptes.`} />
-              <div className="page-stack">
-                {remunerationReport.groups.map((group) => (
-                  <Surface key={group.typeFonctionnement} className="nested-panel">
-                    <SectionHeader title={group.typeFonctionnement} subtitle={`${group.accounts.length} compte(s)`} />
-                    <div className="table-wrapper">
-                      <table className="report-table">
-                        <thead>
-                          <tr>
-                            <th>Compte</th>
-                            {remunerationReport.periods.map((period) => (
-                              <th key={period.key}>{period.label}</th>
+            <>
+              <Surface className="data-panel report-panel">
+                <SectionHeader title="Totaux" />
+                <InlinePeriodTotals
+                  items={remunerationReport.totals.map((period) => ({
+                    label: period.label,
+                    summary: `R ${formatCurrency(period.recette)} · F ${formatCurrency(period.depense)} · N ${formatCurrency(period.solde)}`,
+                  }))}
+                />
+              </Surface>
+
+              {remunerationReport.groups.map((group) => (
+                <CollapsibleReportSection
+                  key={group.typeFonctionnement}
+                  title={group.typeFonctionnement}
+                  aside={<Badge>{formatCurrency(sumPeriodSolde(group.periods))}</Badge>}
+                  open={isSectionOpen(remSections, group.typeFonctionnement)}
+                  onToggle={() => setRemSections((current) => toggleSectionState(current, group.typeFonctionnement))}
+                >
+                  <div className="table-wrapper report-table-soft">
+                    <table className="report-table">
+                      <thead>
+                        <tr>
+                          <th>Compte</th>
+                          {remunerationReport.periods.map((period) => (
+                            <th key={period.key}>{period.label}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {group.accounts.map((account) => (
+                          <tr key={account.identifiant}>
+                            <td>{account.identifiant}</td>
+                            {account.periods.map((period) => (
+                              <td key={`${account.identifiant}_${period.start}`}>
+                                {formatCurrency(period.solde)}
+                                <div className="cell-subline">{reportCellLabel(period.recette, period.depense, 'F')}</div>
+                              </td>
                             ))}
                           </tr>
-                        </thead>
-                        <tbody>
-                          {group.accounts.map((account) => (
-                            <tr key={account.identifiant}>
-                              <td>{account.identifiant}</td>
-                              {account.periods.map((period) => (
-                                <td key={`${account.identifiant}_${period.start}`}>
-                                  {formatCurrency(period.solde)}
-                                  <div className="cell-subline">
-                                    R {formatCurrency(period.recette)} / F {formatCurrency(period.depense)}
-                                  </div>
-                                </td>
-                              ))}
-                            </tr>
+                        ))}
+                      </tbody>
+                      <tfoot>
+                        <tr>
+                          <td>Total</td>
+                          {group.periods.map((period) => (
+                            <td key={`${group.typeFonctionnement}-${period.start}`}>{formatCurrency(period.solde)}</td>
                           ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </Surface>
-                ))}
-              </div>
-            </Surface>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                </CollapsibleReportSection>
+              ))}
+            </>
           )}
         </div>
       ) : null}
@@ -814,12 +1107,11 @@ export function ReportsPage() {
       {tab === 'bilan' ? (
         <div className="page-stack">
           <Surface className="editor-panel">
-            <SectionHeader title="Filtres bilan patrimoine" subtitle="Vue de synthese par type de fonctionnement et par compte." />
             <div className="form-grid three-columns">
-              <FormField label="Date debut">
+              <FormField label="Debut">
                 <input type="date" value={bilanStart} onChange={(event) => setBilanStart(event.target.value)} />
               </FormField>
-              <FormField label="Date fin">
+              <FormField label="Fin">
                 <input type="date" value={bilanEnd} onChange={(event) => setBilanEnd(event.target.value)} />
               </FormField>
               <FormField label="Periode">
@@ -833,7 +1125,7 @@ export function ReportsPage() {
               </FormField>
               <FormField label="Titulaire">
                 <select value={bilanTitulaire} onChange={(event) => setBilanTitulaire(event.target.value)}>
-                  <option value="">Tous les titulaires</option>
+                  <option value="">Tous</option>
                   {(titulairesQuery.data ?? []).map((item) => (
                     <option key={item.nom} value={item.nom}>
                       {item.nom}
@@ -844,7 +1136,7 @@ export function ReportsPage() {
             </div>
 
             <div className="form-field">
-              <span className="form-field-label">Types de fonctionnement</span>
+              <span className="form-field-label">Types</span>
               <div className="checkbox-grid">
                 {(internalAccountsQuery.data ?? [])
                   .map((item) => item.codeTypeFonctionnement)
@@ -852,7 +1144,7 @@ export function ReportsPage() {
                   .map((value) => {
                     const checked = bilanTypes.includes(value)
                     return (
-                      <label key={value} className={`toggle-chip ${checked ? 'checked' : ''}`}>
+                      <label key={value} className={cx('toggle-chip', checked && 'checked')}>
                         <input type="checkbox" checked={checked} onChange={() => setBilanTypes((current) => toggleValue(current, value))} />
                         <span>{value}</span>
                       </label>
@@ -862,12 +1154,12 @@ export function ReportsPage() {
             </div>
 
             <div className="form-field">
-              <span className="form-field-label">Comptes internes</span>
+              <span className="form-field-label">Comptes</span>
               <div className="checkbox-grid">
                 {(internalAccountsQuery.data ?? []).map((item) => {
                   const checked = bilanAccounts.includes(item.identifiant)
                   return (
-                    <label key={item.identifiant} className={`toggle-chip ${checked ? 'checked' : ''}`}>
+                    <label key={item.identifiant} className={cx('toggle-chip', checked && 'checked')}>
                       <input type="checkbox" checked={checked} onChange={() => setBilanAccounts((current) => toggleValue(current, item.identifiant))} />
                       <span>{item.identifiant}</span>
                     </label>
@@ -878,54 +1170,72 @@ export function ReportsPage() {
           </Surface>
 
           {!bilanReport || !bilanReport.groups.length ? (
-            <EmptyState title="Aucun bilan visible" description="Ajuste les filtres pour ouvrir une vue patrimoniale pertinente." />
+            <EmptyState title="Aucun bilan" description="Ajuste les filtres ou la plage." />
           ) : (
-            <Surface className="data-panel">
-              <SectionHeader
+            <>
+              <CollapsibleReportSection
                 title="Bilan patrimoine"
-                subtitle={`Solde initial cumule : ${formatCurrency(bilanReport.montantSoldeInitialEnEuros)}`}
-              />
-              <div className="page-stack">
-                {bilanReport.groups.map((group) => (
-                  <Surface key={group.typeFonctionnement} className="nested-panel">
-                    <SectionHeader
-                      title={group.typeFonctionnement}
-                      subtitle={`Solde initial groupe : ${formatCurrency(group.montantSoldeInitialEnEuros)}`}
-                    />
-                    <div className="table-wrapper">
-                      <table className="report-table">
-                        <thead>
-                          <tr>
-                            <th>Compte</th>
-                            {bilanReport.periods.map((period) => (
-                              <th key={period.key}>{period.label}</th>
+                aside={<Badge>{formatCurrency(bilanReport.montantSoldeInitialEnEuros)}</Badge>}
+                open={isSectionOpen(bilanSections, '__overview__')}
+                onToggle={() => setBilanSections((current) => toggleSectionState(current, '__overview__'))}
+              >
+                <InlinePeriodTotals
+                  items={bilanReport.totals.map((period) => ({
+                    label: period.label,
+                    summary: `Fin ${formatCurrency(period.montantSoldeFinalEnEuros)} · Tech ${formatCurrency(period.soldeTotalTechniqueEnEuros)} · Ecart ${formatCurrency(period.montantEcartNonJustifieEnEuros)}`,
+                  }))}
+                />
+              </CollapsibleReportSection>
+
+              {bilanReport.groups.map((group) => (
+                <CollapsibleReportSection
+                  key={group.typeFonctionnement}
+                  title={group.typeFonctionnement}
+                  aside={<Badge>{formatCurrency(safeTrailingValue(group.periods))}</Badge>}
+                  open={isSectionOpen(bilanSections, group.typeFonctionnement)}
+                  onToggle={() => setBilanSections((current) => toggleSectionState(current, group.typeFonctionnement))}
+                >
+                  <div className="report-inline-note">
+                    <span>Initial</span>
+                    <strong>{formatCurrency(group.montantSoldeInitialEnEuros)}</strong>
+                  </div>
+                  <div className="table-wrapper">
+                    <table className="report-table">
+                      <thead>
+                        <tr>
+                          <th>Compte</th>
+                          {bilanReport.periods.map((period) => (
+                            <th key={period.key}>{period.label}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {group.accounts.map((account) => (
+                          <tr key={account.identifiant}>
+                            <td>{account.identifiant}</td>
+                            {account.periods.map((period) => (
+                              <td key={`${account.identifiant}_${period.start}`}>
+                                {formatCurrency(period.montantSoldeFinalEnEuros)}
+                                <div className="cell-subline">Init {formatCurrency(period.montantSoldeInitialEnEuros)}</div>
+                                <div className="cell-subline">Ecart {formatCurrency(period.montantEcartNonJustifieEnEuros)}</div>
+                              </td>
                             ))}
                           </tr>
-                        </thead>
-                        <tbody>
-                          {group.accounts.map((account) => (
-                            <tr key={account.identifiant}>
-                              <td>{account.identifiant}</td>
-                              {account.periods.map((period) => (
-                                <td key={`${account.identifiant}_${period.start}`}>
-                                  {formatCurrency(period.montantSoldeFinalEnEuros)}
-                                  <div className="cell-subline">
-                                    Init {formatCurrency(period.montantSoldeInitialEnEuros)}
-                                  </div>
-                                  <div className="cell-subline">
-                                    Tech {formatCurrency(period.soldeTotalTechniqueEnEuros)}
-                                  </div>
-                                </td>
-                              ))}
-                            </tr>
+                        ))}
+                      </tbody>
+                      <tfoot>
+                        <tr>
+                          <td>Total</td>
+                          {group.periods.map((period) => (
+                            <td key={`${group.typeFonctionnement}-${period.start}`}>{formatCurrency(period.montantSoldeFinalEnEuros)}</td>
                           ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </Surface>
-                ))}
-              </div>
-            </Surface>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                </CollapsibleReportSection>
+              ))}
+            </>
           )}
         </div>
       ) : null}

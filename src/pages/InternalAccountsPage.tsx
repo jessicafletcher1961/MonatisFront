@@ -31,7 +31,7 @@ const evaluationSchema = z.object({
 
 type AccountFormValues = z.infer<typeof accountSchema>
 type EvaluationFormValues = z.infer<typeof evaluationSchema>
-type DetailTab = 'overview' | 'edit' | 'evaluations' | 'operations'
+type DetailTab = 'overview' | 'evaluations' | 'operations'
 type CreateStep = 'type' | 'identifiant' | 'banque' | 'review'
 
 const ACCOUNT_DEFAULTS: AccountFormValues = {
@@ -68,6 +68,10 @@ function bankMatches(bank: ReferenceListItem, needle: string): boolean {
 
   const normalizedNeedle = needle.trim().toLowerCase()
   return [bank.nom, bank.libelle].filter(Boolean).some((value) => String(value).toLowerCase().includes(normalizedNeedle))
+}
+
+function previewTip(label: string, value: string): string {
+  return `${label}. ${value.trim() || 'Vide'}`
 }
 
 export function InternalAccountsPage() {
@@ -147,6 +151,12 @@ export function InternalAccountsPage() {
   const createBanque = useWatch({ control: createForm.control, name: 'nomBanque' }) ?? ''
   const createDateCloture = useWatch({ control: createForm.control, name: 'dateCloture' }) ?? ''
   const createTitulaires = useWatch({ control: createForm.control, name: 'nomsTitulaires' }) ?? []
+  const editIdentifiant = useWatch({ control: editForm.control, name: 'identifiant' }) ?? ''
+  const editType = useWatch({ control: editForm.control, name: 'codeTypeFonctionnement' }) ?? ''
+  const editBanque = useWatch({ control: editForm.control, name: 'nomBanque' }) ?? ''
+  const editLibelle = useWatch({ control: editForm.control, name: 'libelle' }) ?? ''
+  const editDateSoldeInitial = useWatch({ control: editForm.control, name: 'dateSoldeInitial' }) ?? ''
+  const editMontantSoldeInitial = useWatch({ control: editForm.control, name: 'montantSoldeInitial' }) ?? ''
   const editTitulaires = useWatch({ control: editForm.control, name: 'nomsTitulaires' }) ?? []
   const editDateCloture = useWatch({ control: editForm.control, name: 'dateCloture' }) ?? ''
 
@@ -249,8 +259,8 @@ export function InternalAccountsPage() {
       return null
     }
 
-    return computeBalanceAtDate(selectedAccount, operationsQuery.data, todayIso())
-  }, [operationsQuery.data, selectedAccount])
+    return computeBalanceAtDate(selectedAccount, operationsQuery.data, todayIso(), evaluationsQuery.data ?? [])
+  }, [evaluationsQuery.data, operationsQuery.data, selectedAccount])
 
   const balancesByAccount = useMemo(() => {
     const balances = new Map<string, number>()
@@ -260,11 +270,11 @@ export function InternalAccountsPage() {
     }
 
     ;(accountsQuery.data ?? []).forEach((account) => {
-      balances.set(account.identifiant, computeBalanceAtDate(account, operationsQuery.data, todayIso()))
+      balances.set(account.identifiant, computeBalanceAtDate(account, operationsQuery.data, todayIso(), evaluationsQuery.data ?? []))
     })
 
     return balances
-  }, [accountsQuery.data, operationsQuery.data])
+  }, [accountsQuery.data, evaluationsQuery.data, operationsQuery.data])
 
   const latestOperations = useMemo(() => {
     if (!selectedId || !operationsQuery.data) {
@@ -724,7 +734,7 @@ export function InternalAccountsPage() {
                         <input
                           type="checkbox"
                           checked={checked}
-                          onChange={() => createForm.setValue('nomsTitulaires', toggleName(createTitulaires, titulaire.nom))}
+                          onChange={() => createForm.setValue('nomsTitulaires', toggleName(createTitulaires, titulaire.nom), { shouldDirty: true, shouldTouch: true })}
                         />
                         <span>{titulaire.nom}</span>
                       </label>
@@ -797,9 +807,6 @@ export function InternalAccountsPage() {
               <button type="button" className={cx('modal-tab-button', detailTab === 'overview' && 'active')} onClick={() => setDetailTab('overview')}>
                 Apercu
               </button>
-              <button type="button" className={cx('modal-tab-button', detailTab === 'edit' && 'active')} onClick={() => setDetailTab('edit')}>
-                Modifier
-              </button>
               <button type="button" className={cx('modal-tab-button', detailTab === 'evaluations' && 'active')} onClick={() => setDetailTab('evaluations')}>
                 Evaluations
               </button>
@@ -809,16 +816,21 @@ export function InternalAccountsPage() {
             </div>
 
             {detailTab === 'overview' ? (
-              <div className="page-stack">
+              <form
+                className="page-stack"
+                onSubmit={editForm.handleSubmit(async (values) => {
+                  await updateAccountMutation.mutateAsync(values)
+                })}
+              >
                 <div className="detail-grid">
-                  <div className="detail-card">
+                  <div className="detail-card preview-tip" data-tooltip={previewTip('Solde estime', currentBalance == null ? 'En calcul' : formatCurrency(currentBalance))}>
                     <PiggyBank size={18} />
                     <div className="detail-card-copy">
                       <span>Solde estime</span>
                       <strong>{currentBalance == null ? '...' : formatCurrency(currentBalance)}</strong>
                     </div>
                   </div>
-                  <div className="detail-card">
+                  <div className="detail-card preview-tip" data-tooltip={previewTip('Date solde initial', formatDate(editDateSoldeInitial || selectedAccount.dateSoldeInitial))}>
                     <CalendarDays size={18} />
                     <div className="detail-card-copy">
                       <span>Date solde initial</span>
@@ -827,46 +839,20 @@ export function InternalAccountsPage() {
                   </div>
                 </div>
 
-                <Surface className="inline-panel">
-                  <div className="detail-list">
-                    <div>
-                      <span>Libelle</span>
-                      <strong>{selectedAccount.libelle ?? 'Aucun libelle'}</strong>
-                    </div>
-                    <div>
-                      <span>Banque</span>
-                      <strong>{selectedAccount.nomBanque ?? 'Aucune'}</strong>
-                    </div>
-                    <div>
-                      <span>Titulaires</span>
-                      <strong>{selectedAccount.nomsTitulaires.length ? selectedAccount.nomsTitulaires.join(', ') : 'Aucun titulaire'}</strong>
-                    </div>
-                    <div>
-                      <span>Montant initial</span>
-                      <strong>{formatCurrencyFromCents(selectedAccount.montantSoldeInitialEnCentimes)}</strong>
-                    </div>
-                    <div>
-                      <span>Date de cloture</span>
-                      <strong>{selectedAccount.dateCloture ? formatDate(selectedAccount.dateCloture) : 'Compte ouvert'}</strong>
-                    </div>
-                  </div>
-                </Surface>
-              </div>
-            ) : null}
-
-            {detailTab === 'edit' ? (
-              <form
-                className="page-stack"
-                onSubmit={editForm.handleSubmit(async (values) => {
-                  await updateAccountMutation.mutateAsync(values)
-                })}
-              >
-                <div className="form-grid three-columns">
-                  <FormField label="Identifiant" error={editForm.formState.errors.identifiant?.message}>
+                <div className="operation-overview-grid edit-mode">
+                  <div className="operation-overview-card compact preview-tip" data-tooltip={previewTip('Identifiant', editIdentifiant || selectedAccount.identifiant)}>
+                    <span>Identifiant</span>
                     <input {...editForm.register('identifiant')} />
-                  </FormField>
+                  </div>
 
-                  <FormField label="Type de fonctionnement" error={editForm.formState.errors.codeTypeFonctionnement?.message}>
+                  <div
+                    className="operation-overview-card compact preview-tip"
+                    data-tooltip={previewTip(
+                      'Type de fonctionnement',
+                      sortedTypes.find((type) => type.code === editType)?.code ?? selectedAccount.codeTypeFonctionnement,
+                    )}
+                  >
+                    <span>Type</span>
                     <select {...editForm.register('codeTypeFonctionnement')}>
                       <option value="">Choisir un type</option>
                       {sortedTypes.map((type) => (
@@ -875,9 +861,10 @@ export function InternalAccountsPage() {
                         </option>
                       ))}
                     </select>
-                  </FormField>
+                  </div>
 
-                  <FormField label="Banque">
+                  <div className="operation-overview-card compact preview-tip" data-tooltip={previewTip('Banque', editBanque || 'Aucune')}>
+                    <span>Banque</span>
                     <select {...editForm.register('nomBanque')}>
                       <option value="">Aucune</option>
                       {(banquesQuery.data ?? []).map((bank) => (
@@ -886,19 +873,28 @@ export function InternalAccountsPage() {
                         </option>
                       ))}
                     </select>
-                  </FormField>
+                  </div>
 
-                  <FormField label="Libelle">
-                    <input {...editForm.register('libelle')} />
-                  </FormField>
+                  <div className="operation-overview-card compact wide preview-tip" data-tooltip={previewTip('Libelle', editLibelle || 'Aucun libelle')}>
+                    <span>Libelle</span>
+                    <input {...editForm.register('libelle')} placeholder="Aucun" />
+                  </div>
 
-                  <FormField label="Date solde initial">
+                  <div className="operation-overview-card compact preview-tip" data-tooltip={previewTip('Date solde initial', formatDate(editDateSoldeInitial || selectedAccount.dateSoldeInitial))}>
+                    <span>Date solde initial</span>
                     <input type="date" {...editForm.register('dateSoldeInitial')} />
-                  </FormField>
+                  </div>
 
-                  <FormField label="Montant solde initial">
+                  <div
+                    className="operation-overview-card compact preview-tip"
+                    data-tooltip={previewTip(
+                      'Montant solde initial',
+                      formatCurrencyFromCents(parseMoneyToCents(editMontantSoldeInitial || toMoneyInput(selectedAccount.montantSoldeInitialEnCentimes))),
+                    )}
+                  >
+                    <span>Montant initial</span>
                     <input {...editForm.register('montantSoldeInitial')} inputMode="decimal" />
-                  </FormField>
+                  </div>
                 </div>
 
                 <div className="form-field">
@@ -911,7 +907,7 @@ export function InternalAccountsPage() {
                           <input
                             type="checkbox"
                             checked={checked}
-                            onChange={() => editForm.setValue('nomsTitulaires', toggleName(editTitulaires, titulaire.nom))}
+                            onChange={() => editForm.setValue('nomsTitulaires', toggleName(editTitulaires, titulaire.nom), { shouldDirty: true, shouldTouch: true })}
                           />
                           <span>{titulaire.nom}</span>
                         </label>
@@ -938,12 +934,38 @@ export function InternalAccountsPage() {
                   ) : null}
                 </div>
 
-                <div className="button-row">
-                  <Button type="submit" disabled={updateAccountMutation.isPending}>
-                    <Save size={16} />
-                    Sauvegarder
-                  </Button>
-                </div>
+                {editForm.formState.isDirty ? (
+                  <div className="button-row operation-edit-actions">
+                    <Button
+                      type="button"
+                      tone="ghost"
+                      disabled={updateAccountMutation.isPending}
+                      onClick={() => {
+                        if (!detailQuery.data) {
+                          return
+                        }
+
+                        editForm.reset({
+                          identifiant: detailQuery.data.identifiant,
+                          libelle: detailQuery.data.libelle ?? '',
+                          codeTypeFonctionnement: detailQuery.data.typeFonctionnement.code,
+                          dateSoldeInitial: detailQuery.data.dateSoldeInitial,
+                          montantSoldeInitial: toMoneyInput(detailQuery.data.montantSoldeInitialEnCentimes),
+                          dateCloture: detailQuery.data.dateCloture ?? '',
+                          nomBanque: detailQuery.data.banque?.nom ?? '',
+                          nomsTitulaires: detailQuery.data.titulaires.map((item) => item.nom),
+                        })
+                        setEditDateClotureOpen(false)
+                      }}
+                    >
+                      Annuler
+                    </Button>
+                    <Button type="submit" disabled={updateAccountMutation.isPending}>
+                      <Save size={16} />
+                      Modifier
+                    </Button>
+                  </div>
+                ) : null}
               </form>
             ) : null}
 
