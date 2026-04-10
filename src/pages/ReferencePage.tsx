@@ -5,7 +5,8 @@ import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { useForm, useWatch } from 'react-hook-form'
 import { z } from 'zod'
 
-import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, Surface } from '../components/ui'
+import { QuickReferenceOverlay, type QuickReferenceDialogState } from '../components/quick-create'
+import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, QuickAddButton, Surface } from '../components/ui'
 import { cx } from '../lib/cx'
 import { apiErrorMessage, type ReferenceDetail, type ReferenceListItem, type ReferenceResource, monatisApi } from '../lib/monatis-api'
 import { nullIfBlank } from '../lib/format'
@@ -70,6 +71,7 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
   const [categoryPickerOpen, setCategoryPickerOpen] = useState(false)
   const [categorySearch, setCategorySearch] = useState('')
   const [search, setSearch] = useState('')
+  const [quickReferenceDialog, setQuickReferenceDialog] = useState<QuickReferenceDialogState | null>(null)
   const deferredSearch = useDeferredValue(search)
   const deferredCategorySearch = useDeferredValue(categorySearch)
 
@@ -215,6 +217,14 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
 
   const activeError = listQuery.error || detailQuery.error || createMutation.error || updateMutation.error || deleteMutation.error
 
+  function openQuickReferenceDialog(dialog: QuickReferenceDialogState) {
+    setQuickReferenceDialog(dialog)
+  }
+
+  function closeQuickReferenceDialog() {
+    setQuickReferenceDialog(null)
+  }
+
   return (
     <div className="page-stack">
       <PageHeader
@@ -321,10 +331,22 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
 
       <OverlayPanel open={categoryPickerOpen} onClose={() => setCategoryPickerOpen(false)} title="Choisir une categorie" width="regular" overlayClassName="overlay-top">
         <div className="page-stack">
-          <label className="search-field search-field-thin">
-            <Search size={14} />
-            <input value={categorySearch} onChange={(event) => setCategorySearch(event.target.value)} placeholder="Chercher une categorie..." />
-          </label>
+          <div className="search-action-row">
+            <label className="search-field search-field-thin">
+              <Search size={14} />
+              <input value={categorySearch} onChange={(event) => setCategorySearch(event.target.value)} placeholder="Chercher une categorie..." />
+            </label>
+            <QuickAddButton
+              label="Creer une nouvelle categorie"
+              onClick={() =>
+                openQuickReferenceDialog({
+                  resource: 'categorie',
+                  title: 'Nouvelle categorie',
+                  onCreated: (name) => form.setValue('nomCategorie', name, { shouldDirty: true, shouldTouch: true }),
+                })
+              }
+            />
+          </div>
 
           {!filteredCategories.length ? (
             <EmptyState title="Aucune categorie" description="Aucun resultat pour cette recherche." />
@@ -405,22 +427,59 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
               {config.resource === 'souscategorie' ? (
                 <div className="operation-overview-card compact wide preview-tip" data-tooltip={previewTip('Categorie', watchedNomCategorie || 'Aucune')}>
                   <span>Categorie</span>
-                  <button type="button" className="picker-field picker-field-compact" onClick={() => setCategoryPickerOpen(true)}>
-                    <div className="picker-field-content">
-                      {watchedNomCategorie ? (
-                        <div className="picker-chip-list">
-                          <span className="picker-chip">{watchedNomCategorie}</span>
-                        </div>
-                      ) : (
-                        <span>Choisir</span>
-                      )}
-                    </div>
-                    <Search size={16} />
-                  </button>
+                  <div className="field-action-row">
+                    <button type="button" className="picker-field picker-field-compact" onClick={() => setCategoryPickerOpen(true)}>
+                      <div className="picker-field-content">
+                        {watchedNomCategorie ? (
+                          <div className="picker-chip-list">
+                            <span className="picker-chip">{watchedNomCategorie}</span>
+                          </div>
+                        ) : (
+                          <span>Choisir</span>
+                        )}
+                      </div>
+                      <Search size={16} />
+                    </button>
+                    <QuickAddButton
+                      label="Creer une nouvelle categorie"
+                      onClick={() =>
+                        openQuickReferenceDialog({
+                          resource: 'categorie',
+                          title: 'Nouvelle categorie',
+                          onCreated: (name) => form.setValue('nomCategorie', name, { shouldDirty: true, shouldTouch: true }),
+                        })
+                      }
+                    />
+                  </div>
                 </div>
               ) : null}
 
-              {config.resource !== 'souscategorie' && detailSummary(config.resource, detailQuery.data).length ? (
+              {config.resource === 'categorie' ? (
+                <div className="operation-overview-card compact wide preview-tip" data-tooltip={previewTip('Sous-categories', `${detailSummary(config.resource, detailQuery.data).length} element(s)`)}>
+                  <div className="surface-inline-head">
+                    <span>Sous-categories</span>
+                    <QuickAddButton
+                      label="Creer une nouvelle sous-categorie"
+                      onClick={() =>
+                        openQuickReferenceDialog({
+                          resource: 'souscategorie',
+                          title: 'Nouvelle sous-categorie',
+                          initialCategoryName: detailQuery.data?.nom,
+                        })
+                      }
+                    />
+                  </div>
+                  {detailSummary(config.resource, detailQuery.data).length ? (
+                    <div className="pill-list">
+                      {detailSummary(config.resource, detailQuery.data).map((item) => (
+                        <Badge key={item}>{item}</Badge>
+                      ))}
+                    </div>
+                  ) : (
+                    <small className="muted-inline">Aucune</small>
+                  )}
+                </div>
+              ) : config.resource !== 'souscategorie' && detailSummary(config.resource, detailQuery.data).length ? (
                 <div className="operation-overview-card compact wide preview-tip" data-tooltip={previewTip('Liens', `${detailSummary(config.resource, detailQuery.data).length} element(s)`)}>
                   <span>Liens</span>
                   <div className="pill-list">
@@ -461,6 +520,8 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
           </form>
         )}
       </OverlayPanel>
+
+      <QuickReferenceOverlay dialog={quickReferenceDialog} onClose={closeQuickReferenceDialog} />
     </div>
   )
 }

@@ -39,6 +39,13 @@ export default function App() {
     window.localStorage.setItem('monatis-theme', theme)
   }, [theme])
 
+  useEffect(() => {
+    void import('./pages/DashboardPage')
+    void import('./pages/OperationsAccountsPage')
+    void import('./pages/WorkspacePage')
+    void import('./pages/ReportsPage')
+  }, [])
+
   return (
     <div className="app-shell">
       <header className="shell-header">
@@ -88,14 +95,14 @@ export default function App() {
       {navOpen ? <button type="button" className="shell-scrim" aria-label="Fermer" onClick={() => setNavOpen(false)} /> : null}
 
       <div className="shell-main">
-        <AnimatePresence mode="wait">
+        <AnimatePresence mode="sync">
           <motion.div
             key={`${location.pathname}${location.search}`}
             className="route-stage"
-            initial={{ opacity: 0, y: 18 }}
+            initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -12 }}
-            transition={{ duration: 0.22, ease: 'easeOut' }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.12, ease: 'easeOut' }}
           >
             <Suspense fallback={<LoadingState label="Chargement..." />}>
               <Routes location={location}>

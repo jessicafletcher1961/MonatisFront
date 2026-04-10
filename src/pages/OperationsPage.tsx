@@ -6,7 +6,8 @@ import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { z } from 'zod'
 
-import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, SectionHeader, Surface } from '../components/ui'
+import { QuickAccountOverlay, QuickReferenceOverlay, type QuickAccountDialogState, type QuickReferenceDialogState } from '../components/quick-create'
+import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, QuickAddButton, SectionHeader, Surface } from '../components/ui'
 import { cx } from '../lib/cx'
 import { formatCurrencyFromCents, formatDate, nullIfBlank, parseMoneyToCents, toMoneyInput, todayIso } from '../lib/format'
 import { apiErrorMessage, type CompteSummary, type OperationBasic, type OperationLinePayload, type ReferenceListItem, type TypeOperation, monatisApi } from '../lib/monatis-api'
@@ -288,6 +289,20 @@ function matchesNeedle(value: string, needle: string): boolean {
   return normalizedText(value).includes(normalizedText(needle))
 }
 
+function appendUnique(values: string[], nextValue: string): string[] {
+  return values.includes(nextValue) ? values : [...values, nextValue]
+}
+
+function operationReferenceSummary(operation: OperationBasic): {
+  subCategories: string[]
+  beneficiaries: string[]
+} {
+  const subCategories = Array.from(new Set(operation.lignes.map((line) => subCategoryNameForLine(line)).filter(Boolean)))
+  const beneficiaries = Array.from(new Set(operation.lignes.flatMap((line) => beneficiaryNamesForDisplay(line)).filter(Boolean)))
+
+  return { subCategories, beneficiaries }
+}
+
 function operationTypeGroup(code: string): OperationTypeGroup {
   if (['RECETTE', 'ACHAT'].includes(code)) {
     return 'incoming'
@@ -377,6 +392,58 @@ function previewTip(label: string, value: string): string {
   return `${label}. ${value.trim() || 'Vide'}`
 }
 
+function operationAccountKinds(
+  codeType: string,
+  step: 'depense' | 'recette',
+  options: CompteSummary[],
+  internalIds: Set<string>,
+  externalIds: Set<string>,
+): Array<'interne' | 'externe'> {
+  const group = operationTypeGroup(codeType)
+
+  if (group === 'incoming') {
+    return step === 'depense' ? ['externe'] : ['interne']
+  }
+
+  if (group === 'outgoing') {
+    return step === 'depense' ? ['interne'] : ['externe']
+  }
+
+  if (group === 'internal') {
+    return ['interne']
+  }
+
+  const inferredKinds = new Set<'interne' | 'externe'>()
+
+  options.forEach((account) => {
+    if (internalIds.has(account.identifiant)) {
+      inferredKinds.add('interne')
+    }
+
+    if (externalIds.has(account.identifiant)) {
+      inferredKinds.add('externe')
+    }
+  })
+
+  return inferredKinds.size ? Array.from(inferredKinds) : ['interne', 'externe']
+}
+
+function quickAccountLabel(kinds: Array<'interne' | 'externe'>): string {
+  if (kinds.length === 1) {
+    return kinds[0] === 'interne' ? 'Creer un compte interne' : 'Creer un compte externe'
+  }
+
+  return 'Creer un nouveau compte'
+}
+
+function quickAccountTitle(kinds: Array<'interne' | 'externe'>): string {
+  if (kinds.length === 1) {
+    return kinds[0] === 'interne' ? 'Nouveau compte interne' : 'Nouveau compte externe'
+  }
+
+  return 'Nouveau compte'
+}
+
 export function OperationsPage() {
   const queryClient = useQueryClient()
   const location = useLocation()
@@ -403,6 +470,8 @@ export function OperationsPage() {
   const [openCategoryNames, setOpenCategoryNames] = useState<string[]>([])
   const [subCategoryPickerTarget, setSubCategoryPickerTarget] = useState<SubCategoryPickerTarget>(null)
   const [subCategorySearch, setSubCategorySearch] = useState('')
+  const [quickReferenceDialog, setQuickReferenceDialog] = useState<QuickReferenceDialogState | null>(null)
+  const [quickAccountDialog, setQuickAccountDialog] = useState<QuickAccountDialogState | null>(null)
   const amountInputRef = useRef<HTMLInputElement | null>(null)
   const quickAmountInputRef = useRef<HTMLInputElement | null>(null)
   const createOptionsPanelRef = useRef<HTMLDivElement | null>(null)
@@ -881,6 +950,9 @@ export function OperationsPage() {
     [externalAccountsQuery.data, internalAccountsQuery.data, technicalAccountsQuery.data],
   )
 
+  const internalAccountIds = useMemo(() => new Set((internalAccountsQuery.data ?? []).map((account) => account.identifiant)), [internalAccountsQuery.data])
+  const externalAccountIds = useMemo(() => new Set((externalAccountsQuery.data ?? []).map((account) => account.identifiant)), [externalAccountsQuery.data])
+
   const sortedOperationTypes = useMemo(
     () =>
       [...(typesQuery.data ?? [])].sort((left, right) => {
@@ -952,9 +1024,26 @@ export function OperationsPage() {
     [selectedTypeFilters, sortedOperationTypes],
   )
   const createFlowLabels = useMemo(() => flowLabelsForType(createType), [createType])
+  const createDepenseKinds = useMemo(
+    () => operationAccountKinds(createType, 'depense', depenseOptions, internalAccountIds, externalAccountIds),
+    [createType, depenseOptions, externalAccountIds, internalAccountIds],
+  )
+  const createRecetteKinds = useMemo(
+    () => operationAccountKinds(createType, 'recette', recetteOptions, internalAccountIds, externalAccountIds),
+    [createType, externalAccountIds, internalAccountIds, recetteOptions],
+  )
   const editFlowLabels = useMemo(
     () => flowLabelsForType(editType || detailQuery.data?.typeOperation?.code || detailQuery.data?.codeTypeOperation || ''),
     [detailQuery.data?.codeTypeOperation, detailQuery.data?.typeOperation?.code, editType],
+  )
+  const detailOperationCode = editType || detailQuery.data?.typeOperation?.code || detailQuery.data?.codeTypeOperation || ''
+  const editDepenseKinds = useMemo(
+    () => operationAccountKinds(detailOperationCode, 'depense', allAccounts, internalAccountIds, externalAccountIds),
+    [allAccounts, detailOperationCode, externalAccountIds, internalAccountIds],
+  )
+  const editRecetteKinds = useMemo(
+    () => operationAccountKinds(detailOperationCode, 'recette', allAccounts, internalAccountIds, externalAccountIds),
+    [allAccounts, detailOperationCode, externalAccountIds, internalAccountIds],
   )
   const detailReferenceSummary = useMemo(() => {
     if (!detailQuery.data && !watchedLines.length) {
@@ -1523,6 +1612,31 @@ export function OperationsPage() {
     closeSubCategoryPicker()
   }
 
+  function openQuickReferenceDialog(dialog: QuickReferenceDialogState) {
+    setQuickReferenceDialog(dialog)
+  }
+
+  function closeQuickReferenceDialog() {
+    setQuickReferenceDialog(null)
+  }
+
+  function openQuickAccountDialog(dialog: QuickAccountDialogState) {
+    setQuickAccountDialog(dialog)
+  }
+
+  function closeQuickAccountDialog() {
+    setQuickAccountDialog(null)
+  }
+
+  function openTypedQuickAccountDialog(kinds: Array<'interne' | 'externe'>, onCreated: (identifiant: string) => void) {
+    openQuickAccountDialog({
+      title: quickAccountTitle(kinds),
+      initialKind: kinds[0] ?? 'interne',
+      allowedKinds: kinds,
+      onCreated,
+    })
+  }
+
   function applyDetailLineCollection(lines: OperationLineFormValues[]) {
     const normalizedLines = lines.map((line) => normalizeOperationLineValues(line))
     lineFieldArray.replace(normalizedLines)
@@ -1663,10 +1777,16 @@ export function OperationsPage() {
                   </div>
                 ) : (
                   <>
-                    <label className="search-field search-field-thin">
-                      <Search size={14} />
-                      <input value={depenseSearch} onChange={(event) => setDepenseSearch(event.target.value)} placeholder="Chercher..." />
-                    </label>
+                    <div className="search-action-row">
+                      <label className="search-field search-field-thin">
+                        <Search size={14} />
+                        <input value={depenseSearch} onChange={(event) => setDepenseSearch(event.target.value)} placeholder="Chercher..." />
+                      </label>
+                      <QuickAddButton
+                        label={quickAccountLabel(createDepenseKinds)}
+                        onClick={() => openTypedQuickAccountDialog(createDepenseKinds, (identifiant) => selectDepenseAccount(identifiant))}
+                      />
+                    </div>
                     {!filteredDepenseOptions.length ? (
                       <EmptyState title="Aucun compte" description="Aucun compte compatible." />
                     ) : (
@@ -1737,10 +1857,16 @@ export function OperationsPage() {
                   </div>
                 ) : (
                   <>
-                    <label className="search-field search-field-thin">
-                      <Search size={14} />
-                      <input value={recetteSearch} onChange={(event) => setRecetteSearch(event.target.value)} placeholder="Chercher..." />
-                    </label>
+                    <div className="search-action-row">
+                      <label className="search-field search-field-thin">
+                        <Search size={14} />
+                        <input value={recetteSearch} onChange={(event) => setRecetteSearch(event.target.value)} placeholder="Chercher..." />
+                      </label>
+                      <QuickAddButton
+                        label={quickAccountLabel(createRecetteKinds)}
+                        onClick={() => openTypedQuickAccountDialog(createRecetteKinds, (identifiant) => selectRecetteAccount(identifiant))}
+                      />
+                    </div>
                     {!filteredRecetteOptions.length ? (
                       <EmptyState title="Aucun compte" description="Aucun compte compatible." />
                     ) : (
@@ -1828,6 +1954,21 @@ export function OperationsPage() {
                   <div className="form-field">
                     <span className="form-field-label">Beneficiaires</span>
                     <div className="checkbox-grid">
+                      <QuickAddButton
+                        label="Creer un nouveau beneficiaire"
+                        onClick={() =>
+                          openQuickReferenceDialog({
+                            resource: 'beneficiaire',
+                            title: 'Nouveau beneficiaire',
+                            onCreated: (name) => {
+                              createForm.setValue('nomsBeneficiaires', appendUnique(createForm.getValues('nomsBeneficiaires'), name), {
+                                shouldDirty: true,
+                                shouldTouch: true,
+                              })
+                            },
+                          })
+                        }
+                      />
                       {(beneficiairesQuery.data ?? []).map((item) => {
                         const checked = createBeneficiaries.includes(item.nom)
                         return (
@@ -2025,6 +2166,30 @@ export function OperationsPage() {
                                         <div className="form-field full-span">
                                           <span className="form-field-label">Beneficiaires</span>
                                           <div className="checkbox-grid">
+                                            <QuickAddButton
+                                              label="Creer un nouveau beneficiaire"
+                                              onClick={() =>
+                                                openQuickReferenceDialog({
+                                                  resource: 'beneficiaire',
+                                                  title: 'Nouveau beneficiaire',
+                                                  onCreated: (name) => {
+                                                    if (isPrimaryLine) {
+                                                      createForm.setValue('nomsBeneficiaires', appendUnique(createForm.getValues('nomsBeneficiaires'), name), {
+                                                        shouldDirty: true,
+                                                        shouldTouch: true,
+                                                      })
+                                                      return
+                                                    }
+
+                                                    createForm.setValue(
+                                                      `lignes.${index}.nomsBeneficiaires`,
+                                                      appendUnique(createForm.getValues(`lignes.${index}.nomsBeneficiaires`), name),
+                                                      { shouldDirty: true, shouldTouch: true },
+                                                    )
+                                                  },
+                                                })
+                                              }
+                                            />
                                             {(beneficiairesQuery.data ?? []).map((item) => {
                                               const checked = currentBenefs.includes(item.nom)
                                               return (
@@ -2158,10 +2323,16 @@ export function OperationsPage() {
                         </div>
                       ) : (
                         <div className="page-stack">
-                          <label className="search-field search-field-thin">
-                            <Search size={14} />
-                            <input value={depenseSearch} onChange={(event) => setDepenseSearch(event.target.value)} placeholder="Chercher..." />
-                          </label>
+                          <div className="search-action-row">
+                            <label className="search-field search-field-thin">
+                              <Search size={14} />
+                              <input value={depenseSearch} onChange={(event) => setDepenseSearch(event.target.value)} placeholder="Chercher..." />
+                            </label>
+                            <QuickAddButton
+                              label={quickAccountLabel(createDepenseKinds)}
+                              onClick={() => openTypedQuickAccountDialog(createDepenseKinds, (identifiant) => selectDepenseInQuickEditor(identifiant))}
+                            />
+                          </div>
                           <div className="wizard-choice-grid">
                             {filteredDepenseOptions.map((account) => (
                               <button
@@ -2192,10 +2363,16 @@ export function OperationsPage() {
                         </div>
                       ) : (
                         <div className="page-stack">
-                          <label className="search-field search-field-thin">
-                            <Search size={14} />
-                            <input value={recetteSearch} onChange={(event) => setRecetteSearch(event.target.value)} placeholder="Chercher..." />
-                          </label>
+                          <div className="search-action-row">
+                            <label className="search-field search-field-thin">
+                              <Search size={14} />
+                              <input value={recetteSearch} onChange={(event) => setRecetteSearch(event.target.value)} placeholder="Chercher..." />
+                            </label>
+                            <QuickAddButton
+                              label={quickAccountLabel(createRecetteKinds)}
+                              onClick={() => openTypedQuickAccountDialog(createRecetteKinds, (identifiant) => selectRecetteInQuickEditor(identifiant))}
+                            />
+                          </div>
                           <div className="wizard-choice-grid">
                             {filteredRecetteOptions.map((account) => (
                               <button
@@ -2286,41 +2463,55 @@ export function OperationsPage() {
             <EmptyState title="Aucune operation visible" description="La liste est vide ou le filtre ne matche rien." />
           ) : (
             <div className="catalog-grid catalog-grid-wide">
-              {filteredOperations.map((operation) => (
-                <button
-                  key={operation.numero}
-                  type="button"
-                  className={cx('catalog-card', selectedNumero === operation.numero && 'selected')}
-                  onClick={() => {
-                    setLineBudgetCents(operation.montantEnCentimes)
-                    setSelectedNumero(operation.numero)
-                    setExpandedLineIndex(null)
-                  }}
-                >
-                  <div className="catalog-card-head">
-                    <div>
-                      <strong>{readableOperationLabel(operation)}</strong>
-                      <p>{compactOperationMeta(operation)}</p>
+              {filteredOperations.map((operation) => {
+                const summary = operationReferenceSummary(operation)
+                return (
+                  <button
+                    key={operation.numero}
+                    type="button"
+                    className={cx('catalog-card', selectedNumero === operation.numero && 'selected')}
+                    onClick={() => {
+                      setLineBudgetCents(operation.montantEnCentimes)
+                      setSelectedNumero(operation.numero)
+                      setExpandedLineIndex(null)
+                    }}
+                  >
+                    <div className="catalog-card-head">
+                      <div>
+                        <strong>{readableOperationLabel(operation)}</strong>
+                        <p>{compactOperationMeta(operation)}</p>
+                      </div>
+                      <Badge>{operationTypeCode(operation)}</Badge>
                     </div>
-                    <Badge>{operationTypeCode(operation)}</Badge>
-                  </div>
 
-                  <div className="catalog-meta-grid">
-                    <div className="catalog-meta-pair">
-                      <span>{flowLabelsForType(operationTypeCode(operation)).depenseSummary}</span>
-                      <strong>{selectedAccountLabel(allAccounts, depenseId(operation))}</strong>
+                    <div className="catalog-meta-grid">
+                      <div className="catalog-meta-pair">
+                        <span>{flowLabelsForType(operationTypeCode(operation)).depenseSummary}</span>
+                        <strong>{selectedAccountLabel(allAccounts, depenseId(operation))}</strong>
+                      </div>
+                      <div className="catalog-meta-pair">
+                        <span>{flowLabelsForType(operationTypeCode(operation)).recetteSummary}</span>
+                        <strong>{selectedAccountLabel(allAccounts, recetteId(operation))}</strong>
+                      </div>
+                      <div className="catalog-meta-pair">
+                        <span>Montant</span>
+                        <strong>{formatCurrencyFromCents(operation.montantEnCentimes)}</strong>
+                      </div>
                     </div>
-                    <div className="catalog-meta-pair">
-                      <span>{flowLabelsForType(operationTypeCode(operation)).recetteSummary}</span>
-                      <strong>{selectedAccountLabel(allAccounts, recetteId(operation))}</strong>
-                    </div>
-                    <div className="catalog-meta-pair">
-                      <span>Montant</span>
-                      <strong>{formatCurrencyFromCents(operation.montantEnCentimes)}</strong>
-                    </div>
-                  </div>
-                </button>
-              ))}
+
+                    {summary.subCategories.length || summary.beneficiaries.length ? (
+                      <div className="catalog-pill-list">
+                        {summary.subCategories.map((item) => (
+                          <Badge key={`${operation.numero}-sc-${item}`}>{item}</Badge>
+                        ))}
+                        {summary.beneficiaries.map((item) => (
+                          <Badge key={`${operation.numero}-bf-${item}`}>{item}</Badge>
+                        ))}
+                      </div>
+                    ) : null}
+                  </button>
+                )
+              })}
             </div>
           )}
         </Surface>
@@ -2373,10 +2564,25 @@ export function OperationsPage() {
 
       <OverlayPanel open={Boolean(subCategoryPickerTarget)} onClose={closeSubCategoryPicker} title="Sous-categories" width="regular" overlayClassName="overlay-super-top">
         <div className="page-stack">
-          <label className="search-field search-field-thin">
-            <Search size={14} />
-            <input value={subCategorySearch} onChange={(event) => setSubCategorySearch(event.target.value)} placeholder="Chercher une sous-categorie..." />
-          </label>
+          <div className="search-action-row">
+            <label className="search-field search-field-thin">
+              <Search size={14} />
+              <input value={subCategorySearch} onChange={(event) => setSubCategorySearch(event.target.value)} placeholder="Chercher une sous-categorie..." />
+            </label>
+            <QuickAddButton
+              label="Creer une nouvelle sous-categorie"
+              onClick={() =>
+                openQuickReferenceDialog({
+                  resource: 'souscategorie',
+                  title: 'Nouvelle sous-categorie',
+                  initialCategoryName: openCategoryNames[openCategoryNames.length - 1] ?? '',
+                  onCreated: (name) => {
+                    toggleSubCategory(name)
+                  },
+                })
+              }
+            />
+          </div>
 
           {deferredSubCategorySearch ? (
             !filteredSubCategories.length ? (
@@ -2476,6 +2682,21 @@ export function OperationsPage() {
             <div className="form-field full-span">
               <span className="form-field-label">Beneficiaires</span>
               <div className="checkbox-grid">
+                <QuickAddButton
+                  label="Creer un nouveau beneficiaire"
+                  onClick={() =>
+                    openQuickReferenceDialog({
+                      resource: 'beneficiaire',
+                      title: 'Nouveau beneficiaire',
+                      onCreated: (name) => {
+                        newCreateLineForm.setValue('nomsBeneficiaires', appendUnique(newCreateLineForm.getValues('nomsBeneficiaires'), name), {
+                          shouldDirty: true,
+                          shouldTouch: true,
+                        })
+                      },
+                    })
+                  }
+                />
                 {(beneficiairesQuery.data ?? []).map((item) => {
                   const checked = newCreateLineBeneficiaries.includes(item.nom)
                   return (
@@ -2556,6 +2777,21 @@ export function OperationsPage() {
             <div className="form-field full-span">
               <span className="form-field-label">Beneficiaires</span>
               <div className="checkbox-grid">
+                <QuickAddButton
+                  label="Creer un nouveau beneficiaire"
+                  onClick={() =>
+                    openQuickReferenceDialog({
+                      resource: 'beneficiaire',
+                      title: 'Nouveau beneficiaire',
+                      onCreated: (name) => {
+                        newLineForm.setValue('nomsBeneficiaires', appendUnique(newLineForm.getValues('nomsBeneficiaires'), name), {
+                          shouldDirty: true,
+                          shouldTouch: true,
+                        })
+                      },
+                    })
+                  }
+                />
                 {(beneficiairesQuery.data ?? []).map((item) => {
                   const checked = newLineBeneficiaries.includes(item.nom)
                   return (
@@ -2638,25 +2874,45 @@ export function OperationsPage() {
               </div>
               <div className="operation-overview-card preview-tip" data-tooltip={previewTip(editFlowLabels.depenseSummary, selectedAccountLabel(allAccounts, editDepense || depenseId(detailQuery.data)))}>
                 <span>{editFlowLabels.depenseSummary}</span>
-                <select {...editForm.register('identifiantCompteDepense')}>
-                  <option value="">Choisir</option>
-                  {allAccounts.map((account) => (
-                    <option key={account.identifiant} value={account.identifiant}>
-                      {accountChoiceLabel(account)}
-                    </option>
-                  ))}
-                </select>
+                <div className="field-action-row">
+                  <select {...editForm.register('identifiantCompteDepense')}>
+                    <option value="">Choisir</option>
+                    {allAccounts.map((account) => (
+                      <option key={account.identifiant} value={account.identifiant}>
+                        {accountChoiceLabel(account)}
+                      </option>
+                    ))}
+                  </select>
+                  <QuickAddButton
+                    label={quickAccountLabel(editDepenseKinds)}
+                    onClick={() =>
+                      openTypedQuickAccountDialog(editDepenseKinds, (identifiant) =>
+                        editForm.setValue('identifiantCompteDepense', identifiant, { shouldDirty: true, shouldTouch: true }),
+                      )
+                    }
+                  />
+                </div>
               </div>
               <div className="operation-overview-card preview-tip" data-tooltip={previewTip(editFlowLabels.recetteSummary, selectedAccountLabel(allAccounts, editRecette || recetteId(detailQuery.data)))}>
                 <span>{editFlowLabels.recetteSummary}</span>
-                <select {...editForm.register('identifiantCompteRecette')}>
-                  <option value="">Choisir</option>
-                  {allAccounts.map((account) => (
-                    <option key={account.identifiant} value={account.identifiant}>
-                      {accountChoiceLabel(account)}
-                    </option>
-                  ))}
-                </select>
+                <div className="field-action-row">
+                  <select {...editForm.register('identifiantCompteRecette')}>
+                    <option value="">Choisir</option>
+                    {allAccounts.map((account) => (
+                      <option key={account.identifiant} value={account.identifiant}>
+                        {accountChoiceLabel(account)}
+                      </option>
+                    ))}
+                  </select>
+                  <QuickAddButton
+                    label={quickAccountLabel(editRecetteKinds)}
+                    onClick={() =>
+                      openTypedQuickAccountDialog(editRecetteKinds, (identifiant) =>
+                        editForm.setValue('identifiantCompteRecette', identifiant, { shouldDirty: true, shouldTouch: true }),
+                      )
+                    }
+                  />
+                </div>
               </div>
               <div className="operation-overview-card preview-tip" data-tooltip={previewTip('Montant', formatCurrencyFromCents(parseMoneyToCents(editAmount || toMoneyInput(detailQuery.data.montantEnCentimes))))}>
                 <span>Montant</span>
@@ -2889,6 +3145,21 @@ export function OperationsPage() {
                                 <div className="form-field full-span">
                                   <span className="form-field-label">Beneficiaires</span>
                                   <div className="checkbox-grid">
+                                    <QuickAddButton
+                                      label="Creer un nouveau beneficiaire"
+                                      onClick={() =>
+                                        openQuickReferenceDialog({
+                                          resource: 'beneficiaire',
+                                          title: 'Nouveau beneficiaire',
+                                          onCreated: (name) => {
+                                            editForm.setValue(`lignes.${index}.nomsBeneficiaires`, appendUnique(editForm.getValues(`lignes.${index}.nomsBeneficiaires`), name), {
+                                              shouldDirty: true,
+                                              shouldTouch: true,
+                                            })
+                                          },
+                                        })
+                                      }
+                                    />
                                     {(beneficiairesQuery.data ?? []).map((item) => {
                                       const checked = currentBenefs.includes(item.nom)
                                       return (
@@ -2944,6 +3215,9 @@ export function OperationsPage() {
           </form>
         )}
       </OverlayPanel>
+
+      <QuickReferenceOverlay dialog={quickReferenceDialog} onClose={closeQuickReferenceDialog} />
+      <QuickAccountOverlay dialog={quickAccountDialog} onClose={closeQuickAccountDialog} />
     </div>
   )
 }

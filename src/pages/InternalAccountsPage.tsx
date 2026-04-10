@@ -5,7 +5,8 @@ import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { useForm, useWatch } from 'react-hook-form'
 import { z } from 'zod'
 
-import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, Surface } from '../components/ui'
+import { QuickReferenceOverlay, type QuickReferenceDialogState } from '../components/quick-create'
+import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, QuickAddButton, Surface } from '../components/ui'
 import { cx } from '../lib/cx'
 import { apiErrorMessage, type EvaluationBasic, type ReferenceListItem, type TypeFonctionnement, monatisApi } from '../lib/monatis-api'
 import { formatCurrency, formatCurrencyFromCents, formatDate, nullIfBlank, parseMoneyToCents, toMoneyInput, todayIso } from '../lib/format'
@@ -86,6 +87,7 @@ export function InternalAccountsPage() {
   const [bankSearch, setBankSearch] = useState('')
   const [createDateClotureOpen, setCreateDateClotureOpen] = useState(false)
   const [editDateClotureOpen, setEditDateClotureOpen] = useState(false)
+  const [quickReferenceDialog, setQuickReferenceDialog] = useState<QuickReferenceDialogState | null>(null)
   const createIdentifiantRef = useRef<HTMLInputElement | null>(null)
   const deferredSearch = useDeferredValue(search)
   const deferredBankSearch = useDeferredValue(bankSearch)
@@ -434,6 +436,14 @@ export function InternalAccountsPage() {
     setCreateStep('review')
   }
 
+  function openQuickReferenceDialog(dialog: QuickReferenceDialogState) {
+    setQuickReferenceDialog(dialog)
+  }
+
+  function closeQuickReferenceDialog() {
+    setQuickReferenceDialog(null)
+  }
+
   function goBackCreate() {
     if (createStep === 'review') {
       setCreateStep('banque')
@@ -657,10 +667,22 @@ export function InternalAccountsPage() {
                 <h2>Banque</h2>
               </div>
 
-              <label className="search-field search-field-thin">
-                <Search size={14} />
-                <input value={bankSearch} onChange={(event) => setBankSearch(event.target.value)} placeholder="Chercher une banque..." />
-              </label>
+              <div className="search-action-row">
+                <label className="search-field search-field-thin">
+                  <Search size={14} />
+                  <input value={bankSearch} onChange={(event) => setBankSearch(event.target.value)} placeholder="Chercher une banque..." />
+                </label>
+                <QuickAddButton
+                  label="Creer une nouvelle banque"
+                  onClick={() =>
+                    openQuickReferenceDialog({
+                      resource: 'banque',
+                      title: 'Nouvelle banque',
+                      onCreated: (name) => selectCreateBank(name),
+                    })
+                  }
+                />
+              </div>
 
               <div className="wizard-choice-grid">
                 <button type="button" className={cx('wizard-choice-card', !createBanque && 'active')} onClick={() => selectCreateBank('')}>
@@ -727,6 +749,17 @@ export function InternalAccountsPage() {
               <div className="form-field">
                 <span className="form-field-label">Titulaires associes</span>
                 <div className="checkbox-grid">
+                  <QuickAddButton
+                    label="Creer un nouveau titulaire"
+                    onClick={() =>
+                      openQuickReferenceDialog({
+                        resource: 'titulaire',
+                        title: 'Nouveau titulaire',
+                        onCreated: (name) =>
+                          createForm.setValue('nomsTitulaires', toggleName(createForm.getValues('nomsTitulaires'), name), { shouldDirty: true, shouldTouch: true }),
+                      })
+                    }
+                  />
                   {(titulairesQuery.data ?? []).map((titulaire) => {
                     const checked = createTitulaires.includes(titulaire.nom)
                     return (
@@ -865,14 +898,26 @@ export function InternalAccountsPage() {
 
                   <div className="operation-overview-card compact preview-tip" data-tooltip={previewTip('Banque', editBanque || 'Aucune')}>
                     <span>Banque</span>
-                    <select {...editForm.register('nomBanque')}>
-                      <option value="">Aucune</option>
-                      {(banquesQuery.data ?? []).map((bank) => (
-                        <option key={bank.nom} value={bank.nom}>
-                          {bank.nom}
-                        </option>
-                      ))}
-                    </select>
+                    <div className="field-action-row">
+                      <select {...editForm.register('nomBanque')}>
+                        <option value="">Aucune</option>
+                        {(banquesQuery.data ?? []).map((bank) => (
+                          <option key={bank.nom} value={bank.nom}>
+                            {bank.nom}
+                          </option>
+                        ))}
+                      </select>
+                      <QuickAddButton
+                        label="Creer une nouvelle banque"
+                        onClick={() =>
+                          openQuickReferenceDialog({
+                            resource: 'banque',
+                            title: 'Nouvelle banque',
+                            onCreated: (name) => editForm.setValue('nomBanque', name, { shouldDirty: true, shouldTouch: true }),
+                          })
+                        }
+                      />
+                    </div>
                   </div>
 
                   <div className="operation-overview-card compact wide preview-tip" data-tooltip={previewTip('Libelle', editLibelle || 'Aucun libelle')}>
@@ -900,6 +945,17 @@ export function InternalAccountsPage() {
                 <div className="form-field">
                   <span className="form-field-label">Titulaires associes</span>
                   <div className="checkbox-grid">
+                    <QuickAddButton
+                      label="Creer un nouveau titulaire"
+                      onClick={() =>
+                        openQuickReferenceDialog({
+                          resource: 'titulaire',
+                          title: 'Nouveau titulaire',
+                          onCreated: (name) =>
+                            editForm.setValue('nomsTitulaires', toggleName(editForm.getValues('nomsTitulaires'), name), { shouldDirty: true, shouldTouch: true }),
+                        })
+                      }
+                    />
                     {(titulairesQuery.data ?? []).map((titulaire) => {
                       const checked = editTitulaires.includes(titulaire.nom)
                       return (
@@ -1069,6 +1125,8 @@ export function InternalAccountsPage() {
           </>
         )}
       </OverlayPanel>
+
+      <QuickReferenceOverlay dialog={quickReferenceDialog} onClose={closeQuickReferenceDialog} />
     </div>
   )
 }

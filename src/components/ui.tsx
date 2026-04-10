@@ -1,4 +1,4 @@
-import { AlertTriangle, LoaderCircle, Sparkles, X, type LucideIcon } from 'lucide-react'
+import { AlertTriangle, LoaderCircle, Plus, Sparkles, X, type LucideIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
 
 import { cx } from '../lib/cx'
@@ -22,6 +22,20 @@ export function Button({ tone = 'primary', className, children, ...props }: Butt
       {...props}
     >
       {children}
+    </button>
+  )
+}
+
+export function QuickAddButton({
+  label,
+  className,
+  ...props
+}: Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'children'> & {
+  label: string
+}) {
+  return (
+    <button type="button" className={cx('inline-action-button', 'preview-tip', className)} data-tooltip={label} aria-label={label} {...props}>
+      <Plus size={14} />
     </button>
   )
 }

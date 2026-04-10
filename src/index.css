@@ -618,6 +618,61 @@ textarea {
   min-height: 2.6rem;
 }
 
+.search-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.search-action-row .search-field {
+  flex: 1 1 16rem;
+}
+
+.inline-action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.55rem;
+  height: 2.55rem;
+  border: 1px solid var(--surface-border);
+  border-radius: 999px;
+  color: var(--ink-soft);
+  background: var(--surface-muted);
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.inline-action-button:hover {
+  color: var(--ink);
+  border-color: var(--surface-accent-strong);
+  background: var(--surface-hover);
+  transform: translateY(-1px);
+}
+
+.field-action-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.field-action-row > input,
+.field-action-row > select,
+.field-action-row > textarea {
+  flex: 1 1 auto;
+}
+
+.surface-inline-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.muted-inline {
+  color: var(--text-soft);
+}
+
 .operation-create-panel {
   display: grid;
   gap: 1rem;
@@ -817,6 +872,12 @@ textarea {
   gap: 0.7rem;
 }
 
+.catalog-pill-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
 .catalog-meta-pair {
   display: grid;
   gap: 0.15rem;
@@ -838,6 +899,33 @@ textarea {
   display: flex;
   flex-wrap: wrap;
   gap: 0.55rem;
+}
+
+.inline-segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  padding: 0.35rem;
+  border-radius: 1rem;
+  background: var(--surface-muted);
+}
+
+.inline-segmented-option {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 7rem;
+  min-height: 2.5rem;
+  padding: 0.55rem 0.9rem;
+  border-radius: 0.85rem;
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease;
+}
+
+.inline-segmented-option.active {
+  color: var(--accent-strong);
+  background: var(--surface-accent);
 }
 
 .modal-tab-button {

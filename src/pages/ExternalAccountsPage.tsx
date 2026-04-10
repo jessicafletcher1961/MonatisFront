@@ -5,7 +5,7 @@ import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { useForm, useWatch } from 'react-hook-form'
 import { z } from 'zod'
 
-import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, Surface } from '../components/ui'
+import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, QuickAddButton, Surface } from '../components/ui'
 import { cx } from '../lib/cx'
 import { apiErrorMessage, monatisApi } from '../lib/monatis-api'
 import { nullIfBlank } from '../lib/format'
@@ -140,10 +140,19 @@ export function ExternalAccountsPage() {
 
       <Surface className="catalog-panel">
         <FilterBar>
-          <label className="search-field">
-            <Search size={16} />
-            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Rechercher un compte externe..." />
-          </label>
+          <div className="search-action-row">
+            <label className="search-field">
+              <Search size={16} />
+              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Rechercher un compte externe..." />
+            </label>
+            <QuickAddButton
+              label="Creer un nouveau compte externe"
+              onClick={() => {
+                setCreateOpen(true)
+                setSelectedId(null)
+              }}
+            />
+          </div>
         </FilterBar>
 
         {!filteredAccounts.length ? (
