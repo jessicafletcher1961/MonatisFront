@@ -1,12 +1,13 @@
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useFieldArray, useForm, useWatch } from 'react-hook-form'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Check, ChevronDown, Pencil, Plus, Save, Search, Trash2, X } from 'lucide-react'
+import { ArrowLeft, Check, ChevronDown, Pencil, Plus, Save, Search, Trash2, Upload, X } from 'lucide-react'
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { z } from 'zod'
 
 import { QuickAccountOverlay, QuickReferenceOverlay, type QuickAccountDialogState, type QuickReferenceDialogState } from '../components/quick-create'
+import { StatementImportOverlay } from '../components/statement-import'
 import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, QuickAddButton, SectionHeader, Surface } from '../components/ui'
 import { cx } from '../lib/cx'
 import { formatCurrencyFromCents, formatDate, nullIfBlank, parseMoneyToCents, toMoneyInput, todayIso } from '../lib/format'
@@ -50,6 +51,10 @@ const editSchema = z.object({
 type OperationLineFormValues = z.infer<typeof operationLineSchema>
 type CreateFormValues = z.infer<typeof createSchema>
 type EditFormValues = z.infer<typeof editSchema>
+type CreateOperationInput = {
+  values: CreateFormValues
+  continueWithSameSettings: boolean
+}
 type CreateStep = 'type' | 'depense' | 'recette' | 'amount' | 'review'
 type QuickEditTarget = 'type' | 'depense' | 'recette' | 'amount' | null
 type OperationTypeGroup = 'incoming' | 'outgoing' | 'internal' | 'technical' | 'other'
@@ -454,6 +459,7 @@ export function OperationsPage() {
   const [typeFilterPickerOpen, setTypeFilterPickerOpen] = useState(false)
   const [typeFilterSearch, setTypeFilterSearch] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
+  const [statementImportOpen, setStatementImportOpen] = useState(false)
   const [createStep, setCreateStep] = useState<CreateStep>('type')
   const [createOptionsOpen, setCreateOptionsOpen] = useState(false)
   const [expandedCreateLineIndex, setExpandedCreateLineIndex] = useState<number | null>(null)
@@ -1098,7 +1104,7 @@ export function OperationsPage() {
   )
 
   const createMutation = useMutation({
-    mutationFn: (values: CreateFormValues) => {
+    mutationFn: ({ values }: CreateOperationInput) => {
       return monatisApi.createOperation({
         numero: nullIfBlank(values.numero ?? ''),
         libelle: nullIfBlank(values.libelle ?? ''),
@@ -1111,7 +1117,7 @@ export function OperationsPage() {
         nomsBeneficiaires: values.nomsBeneficiaires,
       })
     },
-    onSuccess: async (response, values) => {
+    onSuccess: async (response, { values, continueWithSameSettings }) => {
       const lines = buildOperationLinePayloads(values.lignes ?? []).map((line) => ({
         ...line,
         numeroLigne: null,
@@ -1141,7 +1147,12 @@ export function OperationsPage() {
       await queryClient.invalidateQueries({ queryKey: ['operations'] })
       setSelectedNumero(null)
       setExpandedLineIndex(null)
-      resetCreateFlow()
+      if (continueWithSameSettings) {
+        continueCreateFlowWithSameSettings(values)
+      } else {
+        resetCreateFlow()
+        setCreateOpen(false)
+      }
     },
   })
 
@@ -1211,6 +1222,7 @@ export function OperationsPage() {
   const depenseReady = depenseIsTechnical ? Boolean(technicalFallbackId) : Boolean(createDepense)
   const recetteReady = recetteIsTechnical ? Boolean(technicalFallbackId) : Boolean(createRecette)
   const createReady = Boolean(createType) && amountReady && depenseReady && recetteReady
+  const createSubmitDisabled = createMutation.isPending || !createReady || hasCreateLineOverflow || hasCreateLineDrafts || createLineTotalMismatch
 
   function resetCreateFlow() {
     createForm.reset(CREATE_DEFAULTS)
@@ -1230,9 +1242,44 @@ export function OperationsPage() {
     newCreateLineForm.reset(makeOperationLineValues(todayIso()))
   }
 
+  function continueCreateFlowWithSameSettings(values: CreateFormValues) {
+    const nextDate = values.dateValeur || todayIso()
+    const keepReferences = ['RECETTE', 'DEPENSE', 'ACHAT', 'VENTE'].includes(values.codeTypeOperation)
+
+    createForm.reset({
+      ...CREATE_DEFAULTS,
+      codeTypeOperation: values.codeTypeOperation,
+      dateValeur: nextDate,
+      libelle: values.libelle ?? '',
+      identifiantCompteDepense: values.identifiantCompteDepense ?? '',
+      identifiantCompteRecette: values.identifiantCompteRecette ?? '',
+      nomSousCategorie: keepReferences ? values.nomSousCategorie ?? '' : '',
+      nomsBeneficiaires: keepReferences ? values.nomsBeneficiaires ?? [] : [],
+      montant: '',
+      numero: '',
+      lignes: [],
+    })
+    setCreateStep('amount')
+    setCreateOptionsOpen(false)
+    setExpandedCreateLineIndex(null)
+    setCreateLineCreateOpen(false)
+    setCreateLineBaselines([])
+    setQuickEditTarget(null)
+    setDepenseSearch('')
+    setRecetteSearch('')
+    setSubCategoryPickerTarget(null)
+    setSubCategorySearch('')
+    newCreateLineForm.reset(makeOperationLineValues(nextDate))
+  }
+
+  async function submitCreateOperation(values: CreateFormValues, continueWithSameSettings: boolean) {
+    await createMutation.mutateAsync({ values, continueWithSameSettings })
+  }
+
   function openCreateFlow() {
     resetCreateFlow()
     setSelectedNumero(null)
+    setStatementImportOpen(false)
     setCreateOpen(true)
   }
 
@@ -1681,10 +1728,16 @@ export function OperationsPage() {
         eyebrow="Operations"
         title="Operations"
         actions={
-          <Button tone={createOpen ? 'ghost' : 'primary'} onClick={createOpen ? closeCreateFlow : openCreateFlow}>
-            {createOpen ? <X size={16} /> : <Plus size={16} />}
-            {createOpen ? 'Fermer' : 'Nouvelle operation'}
-          </Button>
+          <>
+            <Button type="button" tone={statementImportOpen ? 'ghost' : 'soft'} disabled={createOpen} onClick={() => setStatementImportOpen((current) => !current)}>
+              <Upload size={16} />
+              {statementImportOpen ? 'Fermer import' : 'Importer releve'}
+            </Button>
+            <Button type="button" tone={createOpen ? 'ghost' : 'primary'} onClick={createOpen ? closeCreateFlow : openCreateFlow}>
+              {createOpen ? <X size={16} /> : <Plus size={16} />}
+              {createOpen ? 'Fermer' : 'Nouvelle operation'}
+            </Button>
+          </>
         }
       />
 
@@ -1720,8 +1773,7 @@ export function OperationsPage() {
               <form
                 className="page-stack"
                 onSubmit={createForm.handleSubmit(async (values) => {
-                  await createMutation.mutateAsync(values)
-                  closeCreateFlow()
+                  await submitCreateOperation(values, false)
                 })}
               >
             {createStep === 'type' ? (
@@ -2011,10 +2063,16 @@ export function OperationsPage() {
                     {createLines.length ? <Badge>{createLines.length}</Badge> : null}
                   </Button>
                   {!createOptionsOpen ? (
-                    <Button type="submit" disabled={createMutation.isPending || !createReady || hasCreateLineOverflow || hasCreateLineDrafts || createLineTotalMismatch}>
-                      <Save size={16} />
-                      Valider
-                    </Button>
+                    <>
+                      <Button type="button" tone="soft" disabled={createSubmitDisabled} onClick={createForm.handleSubmit((values) => submitCreateOperation(values, true))}>
+                        <Plus size={16} />
+                        Valider + nouvelle similaire
+                      </Button>
+                      <Button type="submit" disabled={createSubmitDisabled}>
+                        <Save size={16} />
+                        Valider
+                      </Button>
+                    </>
                   ) : null}
                 </div>
 
@@ -2253,7 +2311,11 @@ export function OperationsPage() {
                     </div>
 
                     <div className="button-row line-editor-submit-row">
-                      <Button type="submit" disabled={createMutation.isPending || !createReady || hasCreateLineOverflow || hasCreateLineDrafts || createLineTotalMismatch}>
+                      <Button type="button" tone="soft" disabled={createSubmitDisabled} onClick={createForm.handleSubmit((values) => submitCreateOperation(values, true))}>
+                        <Plus size={16} />
+                        Valider + nouvelle similaire
+                      </Button>
+                      <Button type="submit" disabled={createSubmitDisabled}>
                         <Save size={16} />
                         Valider
                       </Button>
@@ -3218,6 +3280,14 @@ export function OperationsPage() {
 
       <QuickReferenceOverlay dialog={quickReferenceDialog} onClose={closeQuickReferenceDialog} />
       <QuickAccountOverlay dialog={quickAccountDialog} onClose={closeQuickAccountDialog} />
+      <StatementImportOverlay
+        open={statementImportOpen}
+        onClose={() => setStatementImportOpen(false)}
+        onImported={async () => {
+          await queryClient.invalidateQueries({ queryKey: ['operations'] })
+          setSelectedNumero(null)
+        }}
+      />
     </div>
   )
 }

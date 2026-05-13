@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Test import PDF Caisse d'Épargne</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <main class="container">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Mini app sans IA</p>
+        <h1>Import de relevé Caisse d'Épargne</h1>
+        <p class="subtitle">
+          Dépose un PDF, l'application détecte le type de document, extrait les opérations et vérifie
+          que la somme des mouvements retombe bien sur les soldes du relevé.
+        </p>
+      </div>
+    </header>
+
+    <section class="card upload-card">
+      <label id="dropzone" class="dropzone" for="pdf-input">
+        <input id="pdf-input" type="file" accept="application/pdf,.pdf" />
+        <span class="drop-icon">PDF</span>
+        <strong>Glisse ton relevé PDF ici</strong>
+        <small>ou clique pour choisir un fichier</small>
+      </label>
+      <button id="analyze-btn" class="primary" disabled>Analyser le PDF</button>
+      <p id="file-name" class="muted"></p>
+    </section>
+
+    <section id="status" class="status hidden"></section>
+
+    <section id="summary" class="card hidden">
+      <h2>Résultat</h2>
+      <div class="summary-grid">
+        <div><span>Banque</span><strong id="bank">-</strong></div>
+        <div><span>Type</span><strong id="doc-type">-</strong></div>
+        <div><span>Année</span><strong id="year">-</strong></div>
+        <div><span>Opérations</span><strong id="count">0</strong></div>
+      </div>
+      <div id="balance-control" class="balance-control hidden">
+        <h3>Contrôle des soldes</h3>
+        <div class="control-grid">
+          <div><span>Ancien solde</span><strong id="opening-balance">-</strong></div>
+          <div><span>Nouveau solde</span><strong id="closing-balance">-</strong></div>
+          <div><span>Somme opérations</span><strong id="transactions-total">-</strong></div>
+          <div><span>Écart attendu</span><strong id="expected-delta">-</strong></div>
+          <div><span>Différence</span><strong id="balance-difference">-</strong></div>
+          <div><span>Statut</span><strong id="balance-status">-</strong></div>
+        </div>
+      </div>
+      <div id="warnings" class="warnings hidden"></div>
+    </section>
+
+    <section id="transactions-card" class="card hidden">
+      <div class="table-header">
+        <div>
+          <h2>Opérations détectées</h2>
+          <p class="muted">Vérifie surtout les montants négatifs/positifs et les libellés multi-lignes.</p>
+        </div>
+        <button id="download-json" class="secondary">Télécharger JSON</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Date op.</th>
+              <th>Date valeur</th>
+              <th>Libellé</th>
+              <th>Montant</th>
+              <th>Page</th>
+              <th>Confiance</th>
+            </tr>
+          </thead>
+          <tbody id="transactions-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="raw-card" class="card hidden">
+      <details>
+        <summary>Voir la réponse JSON complète</summary>
+        <pre id="raw-json"></pre>
+      </details>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

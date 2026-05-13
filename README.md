@@ -7,6 +7,7 @@ Le projet couvre :
 - les comptes externes
 - les comptes internes et leurs evaluations
 - les operations avec compatibilites de comptes
+- l import de releves PDF via le microservice local
 - les rapports V1
 
 ## Stack
@@ -41,6 +42,7 @@ npm run dev
 ```
 
 Par defaut, le front attend le back sur `http://localhost:8082`.
+Le microservice PDF est lance automatiquement par Vite au premier import de releve, depuis `./Micro_Service_PDF_Reader`.
 
 ## Scripts
 
@@ -52,5 +54,7 @@ Par defaut, le front attend le back sur `http://localhost:8082`.
 ## Notes d integration
 
 - Le client API est centralise dans `src/lib/monatis-api.ts`.
+- Le client du microservice PDF est centralise dans `src/lib/pdf-import-api.ts`.
 - Certains rapports sont calcules localement dans `src/lib/reporting.ts` pour contourner les endpoints back en `GET` avec body.
 - L URL API peut etre surchargee via `VITE_MONATIS_API_URL`.
+- L URL du microservice PDF peut etre surchargee via `VITE_MONATIS_PDF_IMPORTER_URL`, mais en local il vaut mieux garder le proxy automatique `/__monatis_pdf_reader`.
