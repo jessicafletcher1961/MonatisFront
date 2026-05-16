@@ -1,7 +1,7 @@
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useFieldArray, useForm, useWatch } from 'react-hook-form'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Check, ChevronDown, Pencil, Plus, Save, Search, Trash2, Upload, X } from 'lucide-react'
+import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Pencil, Plus, Save, Search, Trash2, Upload, X } from 'lucide-react'
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { z } from 'zod'
@@ -11,8 +11,8 @@ import { StatementImportOverlay } from '../components/statement-import'
 import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, QuickAddButton, SectionHeader, Surface } from '../components/ui'
 import { cx } from '../lib/cx'
 import { formatCurrencyFromCents, formatDate, nullIfBlank, parseMoneyToCents, toMoneyInput, todayIso } from '../lib/format'
-import { apiErrorMessage, type CompteSummary, type OperationBasic, type OperationLinePayload, type ReferenceListItem, type TypeOperation, monatisApi } from '../lib/monatis-api'
-import { readableOperationLabel, sortOperationsDesc, technicalAccountFallback } from '../lib/reporting'
+import { apiErrorMessage, type CompteSummary, type OperationBasic, type OperationLinePayload, type OperationPageRequest, type ReferenceListItem, type TypeOperation, monatisApi } from '../lib/monatis-api'
+import { readableOperationLabel, technicalAccountFallback } from '../lib/reporting'
 
 const operationLineSchema = z.object({
   numeroLigne: z.number().nullable().optional(),
@@ -87,6 +87,9 @@ const OPERATION_TYPE_GROUP_META: Array<{ key: OperationTypeGroup; label: string 
   { key: 'other', label: 'Autre' },
 ]
 
+const OPERATION_PAGE_SIZE_OPTIONS = [25, 50, 100, 200]
+const DEFAULT_OPERATION_PAGE_SIZE = 50
+
 function operationTypeCode(operation: OperationBasic): string {
   return operation.codeTypeOperation ?? operation.typeOperation?.code ?? ''
 }
@@ -101,6 +104,30 @@ function recetteId(operation: OperationBasic): string {
 
 function accountChoiceLabel(account: CompteSummary): string {
   return `${account.identifiant}${account.libelle ? ` · ${account.libelle}` : ''}`
+}
+
+function operationPageSearchPayload(value: string): Pick<OperationPageRequest, 'recherche' | 'depuisLe' | 'jusqueAu' | 'montantEnCentimes'> {
+  const needle = value.trim()
+  if (!needle) {
+    return {}
+  }
+
+  const isoDateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(needle)
+  if (isoDateMatch) {
+    return { depuisLe: needle, jusqueAu: needle }
+  }
+
+  const frenchDateMatch = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(needle)
+  if (frenchDateMatch) {
+    const iso = `${frenchDateMatch[3]}-${frenchDateMatch[2]}-${frenchDateMatch[1]}`
+    return { depuisLe: iso, jusqueAu: iso }
+  }
+
+  if (/[,.€]/.test(needle) && /^-?\d+(?:[,.]\d{1,2})?\s*€?$/.test(needle)) {
+    return { montantEnCentimes: Math.abs(parseMoneyToCents(needle.replace('€', ''))) }
+  }
+
+  return { recherche: needle }
 }
 
 function beneficiariesForLine(operation: OperationBasic, lineIndex: number): string[] {
@@ -393,6 +420,24 @@ function compactOperationMeta(operation: OperationBasic): string {
   return [operation.numero, formatDate(operation.dateValeur)].join(' · ')
 }
 
+function operationHistoryMeta(operation: OperationBasic): string {
+  return formatDate(operation.dateValeur)
+}
+
+function operationHistoryReferenceLabel(summary: ReturnType<typeof operationReferenceSummary>): string {
+  const references = [...summary.subCategories, ...summary.beneficiaries]
+
+  if (!references.length) {
+    return 'Sans reference'
+  }
+
+  if (references.length === 1) {
+    return references[0]
+  }
+
+  return `${references[0]} +${references.length - 1}`
+}
+
 function previewTip(label: string, value: string): string {
   return `${label}. ${value.trim() || 'Vide'}`
 }
@@ -456,6 +501,8 @@ export function OperationsPage() {
   const [selectedNumero, setSelectedNumero] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [selectedTypeFilters, setSelectedTypeFilters] = useState<string[]>([])
+  const [operationPageIndex, setOperationPageIndex] = useState(1)
+  const [operationPageSize, setOperationPageSize] = useState(DEFAULT_OPERATION_PAGE_SIZE)
   const [typeFilterPickerOpen, setTypeFilterPickerOpen] = useState(false)
   const [typeFilterSearch, setTypeFilterSearch] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
@@ -489,10 +536,19 @@ export function OperationsPage() {
   const deferredRecetteSearch = useDeferredValue(recetteSearch)
   const deferredTypeFilterSearch = useDeferredValue(typeFilterSearch)
   const deferredSubCategorySearch = useDeferredValue(subCategorySearch)
+  const operationPageRequest = useMemo<OperationPageRequest>(
+    () => ({
+      numeroPage: operationPageIndex,
+      taillePage: operationPageSize,
+      ...operationPageSearchPayload(deferredSearch),
+      codesTypeOperation: selectedTypeFilters.length ? selectedTypeFilters : null,
+    }),
+    [deferredSearch, operationPageIndex, operationPageSize, selectedTypeFilters],
+  )
 
   const operationsQuery = useQuery({
-    queryKey: ['operations'],
-    queryFn: () => monatisApi.listOperations(),
+    queryKey: ['operations', 'page', operationPageRequest],
+    queryFn: () => monatisApi.listOperationsPage(operationPageRequest),
   })
 
   const detailQuery = useQuery({
@@ -816,37 +872,19 @@ export function OperationsPage() {
     [compatQuery.data?.comptesCompatiblesRecette, refinedRecetteQuery.data?.comptesCompatiblesRecette],
   )
 
-  const filteredOperations = useMemo(() => {
-    const needle = deferredSearch.trim().toLowerCase()
-    const items = sortOperationsDesc(operationsQuery.data ?? [])
-
-    return items.filter((operation) => {
-      if (selectedTypeFilters.length && !selectedTypeFilters.includes(operationTypeCode(operation))) {
-        return false
-      }
-
-      if (!needle) {
-        return true
-      }
-
-      return [
-        operation.numero,
-        operation.libelle,
-        operationTypeCode(operation),
-        depenseId(operation),
-        recetteId(operation),
-        toMoneyInput(operation.montantEnCentimes),
-        formatCurrencyFromCents(operation.montantEnCentimes),
-      ]
-        .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(needle))
-    })
-  }, [deferredSearch, operationsQuery.data, selectedTypeFilters])
+  const filteredOperations = useMemo(() => operationsQuery.data?.operations ?? [], [operationsQuery.data?.operations])
+  const operationTotalCount = operationsQuery.data?.totalOperations ?? 0
+  const operationTotalPages = operationsQuery.data?.totalPages ?? 0
+  const operationCurrentPage = operationsQuery.data?.numeroPage ?? operationPageIndex
+  const operationFirstVisible = operationsQuery.data?.premierElement ?? 0
+  const operationLastVisible = operationsQuery.data?.dernierElement ?? 0
+  const operationPageLabel = operationTotalCount ? `${operationCurrentPage}/${Math.max(operationTotalPages, 1)}` : '0/0'
 
   const selectedOperationSummary = useMemo(
-    () => (operationsQuery.data ?? []).find((operation) => operation.numero === selectedNumero) ?? null,
-    [operationsQuery.data, selectedNumero],
+    () => filteredOperations.find((operation) => operation.numero === selectedNumero) ?? null,
+    [filteredOperations, selectedNumero],
   )
+  const selectedOperationForDisplay = selectedOperationSummary ?? detailQuery.data ?? null
   const createDefinedAmountCents = parseMoneyToCents(createAmount || '0')
   const createPrimaryLineIndex = useMemo(() => primaryLineIndex(createLines), [createLines])
   const createPrimaryRemainingCents = useMemo(
@@ -1145,6 +1183,7 @@ export function OperationsPage() {
       }
 
       await queryClient.invalidateQueries({ queryKey: ['operations'] })
+      setOperationPageIndex(1)
       setSelectedNumero(null)
       setExpandedLineIndex(null)
       if (continueWithSameSettings) {
@@ -1179,12 +1218,14 @@ export function OperationsPage() {
   })
 
   const deleteMutation = useMutation({
-    mutationFn: () => monatisApi.deleteOperation(selectedNumero!),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['operations'] })
+    mutationFn: (numero: string) => monatisApi.deleteOperation(numero),
+    onSuccess: async (_deletedOperation, deletedNumero) => {
+      setOperationPageIndex(1)
       setLineBudgetCents(null)
       setSelectedNumero(null)
       setExpandedLineIndex(null)
+      setLineCreateOpen(false)
+      closeSubCategoryPicker()
       editForm.reset({
         numero: '',
         libelle: '',
@@ -1197,6 +1238,8 @@ export function OperationsPage() {
         lignes: [],
       })
       setDetailLineBaselines([])
+      queryClient.removeQueries({ queryKey: ['operations', deletedNumero] })
+      await queryClient.invalidateQueries({ queryKey: ['operations'] })
     },
   })
 
@@ -1597,11 +1640,68 @@ export function OperationsPage() {
   }
 
   function toggleTypeFilter(code: string) {
+    setOperationPageIndex(1)
     setSelectedTypeFilters((current) => (current.includes(code) ? current.filter((value) => value !== code) : [...current, code]))
   }
 
   function clearTypeFilters() {
+    setOperationPageIndex(1)
     setSelectedTypeFilters([])
+  }
+
+  function changeOperationPageSize(value: string) {
+    const nextSize = Number(value)
+    if (!OPERATION_PAGE_SIZE_OPTIONS.includes(nextSize)) {
+      return
+    }
+
+    setOperationPageSize(nextSize)
+    setOperationPageIndex(1)
+  }
+
+  function changeOperationPage(nextPage: number) {
+    if (!operationTotalCount) {
+      return
+    }
+
+    setOperationPageIndex(Math.max(1, Math.min(Math.max(operationTotalPages, 1), nextPage)))
+  }
+
+  function renderOperationPaginationControls(position: 'top' | 'bottom') {
+    return (
+      <div className={cx('catalog-list-controls', position === 'bottom' && 'bottom')} aria-label={`Pagination des operations ${position === 'bottom' ? 'bas' : 'haut'}`}>
+        <div className="catalog-list-count">
+          <strong>{operationTotalCount ? `${operationFirstVisible}-${operationLastVisible}` : '0'}</strong>
+          <span>{`sur ${operationTotalCount}`}</span>
+        </div>
+
+        <label className="catalog-page-size">
+          <span>Afficher</span>
+          <select value={operationPageSize} onChange={(event) => changeOperationPageSize(event.target.value)} aria-label="Nombre d'operations affichees">
+            {OPERATION_PAGE_SIZE_OPTIONS.map((size) => (
+              <option key={size} value={size}>
+                {size}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <div className="catalog-page-buttons">
+          <button type="button" disabled={!operationTotalCount || operationCurrentPage <= 1} onClick={() => changeOperationPage(operationCurrentPage - 1)} aria-label="Page precedente">
+            <ChevronLeft size={15} />
+          </button>
+          <span>{operationPageLabel}</span>
+          <button
+            type="button"
+            disabled={!operationTotalCount || operationCurrentPage >= Math.max(operationTotalPages, 1)}
+            onClick={() => changeOperationPage(operationCurrentPage + 1)}
+            aria-label="Page suivante"
+          >
+            <ChevronRight size={15} />
+          </button>
+        </div>
+      </div>
+    )
   }
 
   function openSubCategoryPicker(target: Exclude<SubCategoryPickerTarget, null>) {
@@ -2499,7 +2599,14 @@ export function OperationsPage() {
           <FilterBar>
             <label className="search-field">
               <Search size={16} />
-              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Chercher une operation..." />
+              <input
+                value={search}
+                onChange={(event) => {
+                  setSearch(event.target.value)
+                  setOperationPageIndex(1)
+                }}
+                placeholder="Chercher une operation..."
+              />
             </label>
 
             <button type="button" className="picker-field picker-field-compact" onClick={() => setTypeFilterPickerOpen(true)}>
@@ -2521,61 +2628,53 @@ export function OperationsPage() {
             </button>
           </FilterBar>
 
-          {!filteredOperations.length ? (
+          {renderOperationPaginationControls('top')}
+
+          {!operationsQuery.isLoading && !filteredOperations.length ? (
             <EmptyState title="Aucune operation visible" description="La liste est vide ou le filtre ne matche rien." />
           ) : (
-            <div className="catalog-grid catalog-grid-wide">
+            <div className="operation-history-list">
               {filteredOperations.map((operation) => {
                 const summary = operationReferenceSummary(operation)
+                const typeCode = operationTypeCode(operation)
+                const label = readableOperationLabel(operation)
+                const depenseLabel = selectedAccountLabel(allAccounts, depenseId(operation))
+                const recetteLabel = selectedAccountLabel(allAccounts, recetteId(operation))
+                const flowLabel = `${flowLabelsForType(typeCode).depenseSummary}: ${depenseLabel} · ${flowLabelsForType(typeCode).recetteSummary}: ${recetteLabel}`
                 return (
                   <button
                     key={operation.numero}
                     type="button"
-                    className={cx('catalog-card', selectedNumero === operation.numero && 'selected')}
+                    className={cx('operation-history-row', selectedNumero === operation.numero && 'selected')}
                     onClick={() => {
                       setLineBudgetCents(operation.montantEnCentimes)
                       setSelectedNumero(operation.numero)
                       setExpandedLineIndex(null)
                     }}
                   >
-                    <div className="catalog-card-head">
-                      <div>
-                        <strong>{readableOperationLabel(operation)}</strong>
-                        <p>{compactOperationMeta(operation)}</p>
-                      </div>
-                      <Badge>{operationTypeCode(operation)}</Badge>
+                    <div className="operation-history-main">
+                      <strong title={label}>{label}</strong>
+                      <span>{operationHistoryMeta(operation)}</span>
                     </div>
 
-                    <div className="catalog-meta-grid">
-                      <div className="catalog-meta-pair">
-                        <span>{flowLabelsForType(operationTypeCode(operation)).depenseSummary}</span>
-                        <strong>{selectedAccountLabel(allAccounts, depenseId(operation))}</strong>
-                      </div>
-                      <div className="catalog-meta-pair">
-                        <span>{flowLabelsForType(operationTypeCode(operation)).recetteSummary}</span>
-                        <strong>{selectedAccountLabel(allAccounts, recetteId(operation))}</strong>
-                      </div>
-                      <div className="catalog-meta-pair">
-                        <span>Montant</span>
-                        <strong>{formatCurrencyFromCents(operation.montantEnCentimes)}</strong>
-                      </div>
+                    <div className="operation-history-flow" title={flowLabel}>
+                      <span>{depenseLabel}</span>
+                      <ChevronRight size={12} aria-hidden="true" />
+                      <span>{recetteLabel}</span>
                     </div>
 
-                    {summary.subCategories.length || summary.beneficiaries.length ? (
-                      <div className="catalog-pill-list">
-                        {summary.subCategories.map((item) => (
-                          <Badge key={`${operation.numero}-sc-${item}`}>{item}</Badge>
-                        ))}
-                        {summary.beneficiaries.map((item) => (
-                          <Badge key={`${operation.numero}-bf-${item}`}>{item}</Badge>
-                        ))}
-                      </div>
-                    ) : null}
+                    <Badge>{typeCode}</Badge>
+                    <span className="operation-history-reference" title={operationHistoryReferenceLabel(summary)}>
+                      {operationHistoryReferenceLabel(summary)}
+                    </span>
+                    <strong className="operation-history-amount">{formatCurrencyFromCents(operation.montantEnCentimes)}</strong>
                   </button>
                 )
               })}
             </div>
           )}
+
+          {renderOperationPaginationControls('bottom')}
         </Surface>
       </div>
 
@@ -2892,16 +2991,17 @@ export function OperationsPage() {
       <OverlayPanel
         open={Boolean(selectedNumero)}
         onClose={closeDetailOverlay}
-        title={selectedOperationSummary ? readableOperationLabel(selectedOperationSummary) : 'Operation'}
-        subtitle={selectedOperationSummary ? compactOperationMeta(selectedOperationSummary) : undefined}
+        title={selectedOperationForDisplay ? readableOperationLabel(selectedOperationForDisplay) : 'Operation'}
+        subtitle={selectedOperationForDisplay ? compactOperationMeta(selectedOperationForDisplay) : undefined}
         width="wide"
         actions={
           selectedNumero ? (
             <Button
               tone="danger"
               onClick={() => {
-                if (window.confirm(`Supprimer l operation ${selectedNumero} ?`)) {
-                  void deleteMutation.mutateAsync()
+                const numeroToDelete = selectedNumero
+                if (numeroToDelete && window.confirm(`Supprimer l operation ${numeroToDelete} ?`)) {
+                  void deleteMutation.mutateAsync(numeroToDelete)
                 }
               }}
             >
@@ -3285,6 +3385,7 @@ export function OperationsPage() {
         onClose={() => setStatementImportOpen(false)}
         onImported={async () => {
           await queryClient.invalidateQueries({ queryKey: ['operations'] })
+          setOperationPageIndex(1)
           setSelectedNumero(null)
         }}
       />

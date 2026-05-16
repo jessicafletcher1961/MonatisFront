@@ -72,12 +72,31 @@ def test_build_monatis_import_maps_debit_and_credit_roles():
     assert debit["counterpartyAccountRole"] == "recette"
     assert debit["montantEnCentimes"] == 4235
     assert debit["suggestedCounterpartyName"] == "BOULANGER"
+    assert debit["dateComptabilisation"] == "2025-01-01"
 
     assert credit["codeTypeOperation"] == "RECETTE"
     assert credit["statementAccountRole"] == "recette"
     assert credit["counterpartyAccountRole"] == "depense"
     assert credit["montantEnCentimes"] == 120000
     assert payload["monatis"]["auto_selected_count"] == 2
+
+
+def test_build_monatis_import_uses_fact_date_as_accounting_date():
+    payload = build_monatis_import(
+        [
+            {
+                "operation_date": "2025-01-04",
+                "value_date": "2025-01-04",
+                "label_raw": "CB MICASALVA FACT 031224",
+                "amount": -12.4,
+                "currency": "EUR",
+            },
+        ]
+    )
+
+    operation = payload["operation_candidates"][0]
+    assert operation["dateValeur"] == "2025-01-04"
+    assert operation["dateComptabilisation"] == "2024-12-03"
 
 
 def test_build_monatis_import_detects_recurring_external_account_groups():
@@ -112,6 +131,8 @@ def test_build_monatis_import_detects_recurring_external_account_groups():
     assert first["groupLabel"] == "BOULANGER"
     assert first["groupSize"] == 2
     assert first["isRecurring"] is True
+    assert first["dateComptabilisation"] == "2025-01-01"
+    assert second["dateComptabilisation"] == "2025-01-06"
     assert third["groupSize"] == 1
     assert third["isRecurring"] is False
 

@@ -11,6 +11,7 @@ export interface ApiError {
 }
 
 export interface ReferenceBase {
+  id?: number
   nom: string
   libelle: string | null
 }
@@ -34,6 +35,7 @@ export interface TypeOperation {
 }
 
 export interface CompteSummary {
+  id?: number
   identifiant: string
   libelle: string | null
 }
@@ -90,6 +92,7 @@ export interface OperationBasic {
   numero: string
   libelle: string | null
   dateValeur: string
+  dateCreation?: string | null
   montantEnCentimes: number
   pointee: boolean
   codeTypeOperation?: string
@@ -172,6 +175,143 @@ export interface OperationUpdatePayload {
   identifiantCompteRecette: string | null
   pointee: boolean | null
   lignes: OperationLinePayload[]
+}
+
+export interface OperationPageRequest {
+  numeroPage?: number
+  taillePage?: number
+  recherche?: string | null
+  codeTypeOperation?: string | null
+  codesTypeOperation?: string[] | null
+  depuisLe?: string | null
+  jusqueAu?: string | null
+  montantEnCentimes?: number | null
+  identifiantCompteRecetteOuDepense?: string | null
+  identifiantCompteRecette?: string | null
+  identifiantCompteDepense?: string | null
+  pointee?: boolean | null
+}
+
+export interface OperationPageResponse {
+  operations: OperationBasic[]
+  numeroPage: number
+  taillePage: number
+  totalOperations: number
+  totalPages: number
+  premierElement: number
+  dernierElement: number
+}
+
+export type ImportRuleRole = 'DEPENSE' | 'RECETTE'
+
+export interface StatementImportRule {
+  id: number
+  cleLibelleNormalisee: string
+  libelleExemple: string | null
+  roleCompteExterne: ImportRuleRole
+  codeTypeOperation: string
+  compteInterneContexteId: number | null
+  identifiantCompteInterneContexte: string | null
+  libelleCompteInterneContexte: string | null
+  compteExterneId: number | null
+  identifiantCompteExterne: string | null
+  libelleCompteExterne: string | null
+  sousCategorieId: number | null
+  nomSousCategorie: string | null
+  libelleSousCategorie: string | null
+  beneficiaireIds: number[]
+  nomsBeneficiaires: string[]
+  nombreUtilisations: number
+  dateDerniereUtilisation: string | null
+  active: boolean
+}
+
+export interface StatementImportRuleSuggestionOperationRequest {
+  operationImportId: string
+  libelle: string
+  groupKey: string
+  roleCompteExterne: ImportRuleRole
+  compteInterneContexteId?: number | null
+  identifiantCompteInterneContexte?: string | null
+}
+
+export interface StatementImportRuleSuggestionRequest {
+  operations: StatementImportRuleSuggestionOperationRequest[]
+}
+
+export interface StatementImportRuleSuggestionOperationResponse {
+  index: number
+  operationImportId: string
+  cleLibelleNormalisee: string | null
+  suggestionTrouvee: boolean
+  regle: StatementImportRule | null
+}
+
+export interface StatementImportRuleSuggestionResponse {
+  operations: StatementImportRuleSuggestionOperationResponse[]
+}
+
+export interface StatementImportRuleLearningItemRequest {
+  libelle: string
+  groupKey: string
+  roleCompteExterne: ImportRuleRole
+  codeTypeOperation: string
+  compteInterneContexteId?: number | null
+  identifiantCompteInterneContexte?: string | null
+  compteExterneId?: number | null
+  identifiantCompteExterne?: string | null
+  sousCategorieId?: number | null
+  nomSousCategorie?: string | null
+  beneficiaireIds?: number[]
+  nomsBeneficiaires?: string[]
+}
+
+export interface StatementImportRuleLearningRequest {
+  operations: StatementImportRuleLearningItemRequest[]
+}
+
+export type StatementImportDuplicateStatus = 'NOUVELLE' | 'DOUBLON_PROBABLE' | 'DOUBLON_EXACT'
+
+export interface StatementImportDuplicateOperationRequest {
+  operationImportId: string
+  libelle: string
+  dateValeur: string | null
+  dateComptabilisation: string | null
+  montantEnCentimes: number | null
+  codeTypeOperation: string
+  identifiantCompteDepense: string
+  identifiantCompteRecette: string
+}
+
+export interface StatementImportDuplicateRequest {
+  operations: StatementImportDuplicateOperationRequest[]
+}
+
+export interface StatementImportDuplicateExistingOperation {
+  numero: string
+  libelle: string | null
+  dateValeur: string | null
+  dateComptabilisation: string | null
+  dateCreation?: string | null
+  montantEnCentimes: number | null
+  codeTypeOperation: string | null
+  identifiantCompteDepense: string | null
+  libelleCompteDepense: string | null
+  identifiantCompteRecette: string | null
+  libelleCompteRecette: string | null
+}
+
+export interface StatementImportDuplicateOperationResponse {
+  index: number
+  operationImportId: string
+  statut: StatementImportDuplicateStatus
+  score: number
+  raisons: string[]
+  operationExistante: StatementImportDuplicateExistingOperation | null
+}
+
+export interface StatementImportDuplicateResponse {
+  operations: StatementImportDuplicateOperationResponse[]
 }
 
 async function parseError(response: Response): Promise<ApiError> {
@@ -354,6 +494,13 @@ export const monatisApi = {
     return requestJson<OperationBasic[]>('/monatis/operations/all')
   },
 
+  listOperationsPage(payload: OperationPageRequest) {
+    return requestJson<OperationPageResponse>('/monatis/operations/page', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+
   getOperation(numero: string) {
     return requestJson<OperationBasic>(`/monatis/operations/get/${encodeURIComponent(numero)}`)
   },
@@ -399,6 +546,31 @@ export const monatisApi = {
   deleteOperation(numero: string) {
     return requestJson<void>(`/monatis/operations/del/${encodeURIComponent(numero)}`, {
       method: 'DELETE',
+    })
+  },
+
+  listStatementImportRules() {
+    return requestJson<StatementImportRule[]>('/monatis/imports-releves/regles/all')
+  },
+
+  suggestStatementImportRules(payload: StatementImportRuleSuggestionRequest) {
+    return requestJson<StatementImportRuleSuggestionResponse>('/monatis/imports-releves/regles/suggestions', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  learnStatementImportRules(payload: StatementImportRuleLearningRequest) {
+    return requestJson<StatementImportRule[]>('/monatis/imports-releves/regles/apprentissage', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  detectStatementImportDuplicates(payload: StatementImportDuplicateRequest) {
+    return requestJson<StatementImportDuplicateResponse>('/monatis/imports-releves/doublons', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     })
   },
 }

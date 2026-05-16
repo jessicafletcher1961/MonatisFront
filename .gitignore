@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# Local PDF samples and import fixtures
+Micro_Service_PDF_Reader/20250107 - Relevé de compte 194.pdf
+Micro_Service_PDF_Reader/*.pdf
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

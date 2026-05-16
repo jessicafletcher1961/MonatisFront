@@ -239,21 +239,27 @@ export function OverlayPanel({
   open,
   onClose,
   title,
+  titlePrefix,
   subtitle,
   actions,
   width = 'wide',
   overlayClassName,
   className,
+  closeOnBackdrop = true,
+  dialogAccessory,
   children,
 }: {
   open: boolean
   onClose: () => void
   title?: string
+  titlePrefix?: ReactNode
   subtitle?: string
   actions?: ReactNode
   width?: 'regular' | 'wide'
   overlayClassName?: string
   className?: string
+  closeOnBackdrop?: boolean
+  dialogAccessory?: ReactNode
   children: ReactNode
 }) {
   if (!open) {
@@ -262,12 +268,23 @@ export function OverlayPanel({
 
   return (
     <div className={cx('floating-panel-overlay', overlayClassName)} role="dialog" aria-modal="true" aria-label={title ?? 'Panneau'}>
-      <button type="button" className="floating-panel-backdrop" aria-label="Fermer" onClick={onClose} />
+      <button
+        type="button"
+        className="floating-panel-backdrop"
+        aria-label={closeOnBackdrop ? 'Fermer' : 'Fond'}
+        disabled={!closeOnBackdrop}
+        onClick={closeOnBackdrop ? onClose : undefined}
+      />
       <div className={cx('floating-panel-dialog', width === 'regular' ? 'regular' : 'wide')}>
         <Surface className={cx('floating-panel', className)}>
           <div className="floating-panel-header">
-            <div>
-              {title ? <h2>{title}</h2> : null}
+            <div className="floating-panel-title-block">
+              {title || titlePrefix ? (
+                <div className="floating-panel-title-row">
+                  {titlePrefix}
+                  {title ? <h2>{title}</h2> : null}
+                </div>
+              ) : null}
               {subtitle ? <p>{subtitle}</p> : null}
             </div>
             <div className="floating-panel-actions">
@@ -279,6 +296,7 @@ export function OverlayPanel({
           </div>
           <div className="floating-panel-body">{children}</div>
         </Surface>
+        {dialogAccessory}
       </div>
     </div>
   )

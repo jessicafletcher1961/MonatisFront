@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Mapping, Sequence
 
@@ -73,6 +74,22 @@ def _compact_counterparty_name(label: str) -> str | None:
     return shortened or cleaned[:48].strip(" -")
 
 
+def _date_comptabilisation_from_fact(label: str) -> str | None:
+    match = re.search(r"\bFACT\s+(\d{6})\b", label, flags=re.IGNORECASE)
+    if not match:
+        return None
+
+    raw_date = match.group(1)
+    day = int(raw_date[:2])
+    month = int(raw_date[2:4])
+    year = 2000 + int(raw_date[4:6])
+
+    try:
+        return date(year, month, day).isoformat()
+    except ValueError:
+        return None
+
+
 def _normalize_group_token(value: str) -> str:
     normalized = unicodedata.normalize("NFD", value)
     normalized = "".join(char for char in normalized if unicodedata.category(char) != "Mn")
@@ -84,27 +101,37 @@ def _normalize_group_token(value: str) -> str:
     ignored_words = {
         "ACHAT",
         "AU",
+        "AUX",
+        "AVEC",
         "CARTE",
         "CB",
         "CHEQUE",
+        "D",
         "DE",
+        "DES",
+        "DEPENSE",
         "DU",
+        "EN",
         "FACT",
         "FR",
+        "LA",
         "LE",
         "LES",
         "N",
         "PAR",
+        "PAIEMENT",
         "PRELEVEMENT",
         "PRLV",
         "RECU",
+        "RECETTE",
         "REF",
         "REMISE",
         "SEPA",
+        "SUR",
         "VIR",
         "VIREMENT",
     }
-    tokens = [token for token in normalized.split() if token not in ignored_words and not token.isdigit()]
+    tokens = [token for token in normalized.split() if len(token) > 1 and token not in ignored_words and not token.isdigit()]
 
     return " ".join(tokens).strip()
 
@@ -118,8 +145,9 @@ def _group_key_for_candidate(candidate: Mapping[str, Any]) -> str:
     token = _normalize_group_token(label) or _normalize_group_token(str(candidate.get("libelle") or "")) or str(candidate["id"])
     role = str(candidate.get("counterpartyAccountRole") or "")
     code_type = str(candidate.get("codeTypeOperation") or "")
-    raw_key = f"{role}|{code_type}|{token[:80]}"
-    return hashlib.sha1(raw_key.encode("utf-8")).hexdigest()[:16]
+    raw_key = f"{role}-{code_type}-{token[:80]}"
+    key = re.sub(r"[^a-z0-9]+", "-", raw_key.lower()).strip("-")
+    return key[:96] or hashlib.sha1(raw_key.encode("utf-8")).hexdigest()[:16]
 
 
 def _candidate_from_transaction(index: int, transaction: Mapping[str, Any]) -> dict[str, Any]:
@@ -145,7 +173,7 @@ def _candidate_from_transaction(index: int, transaction: Mapping[str, Any]) -> d
         "selected": amount_cents is not None,
         "codeTypeOperation": code_type,
         "dateValeur": transaction.get("value_date") or transaction.get("operation_date"),
-        "dateComptabilisation": transaction.get("operation_date") or transaction.get("value_date"),
+        "dateComptabilisation": _date_comptabilisation_from_fact(label) or transaction.get("operation_date") or transaction.get("value_date"),
         "numero": None,
         "libelle": label,
         "montantEnCentimes": amount_cents,

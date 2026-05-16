@@ -139,23 +139,33 @@ function normalizedGroupToken(value: string): string {
   const ignoredWords = new Set([
     'ACHAT',
     'AU',
+    'AUX',
+    'AVEC',
     'CARTE',
     'CB',
     'CHEQUE',
+    'D',
     'DE',
+    'DES',
+    'DEPENSE',
     'DU',
+    'EN',
     'FACT',
     'FR',
+    'LA',
     'LE',
     'LES',
     'N',
     'PAR',
+    'PAIEMENT',
     'PRELEVEMENT',
     'PRLV',
     'RECU',
+    'RECETTE',
     'REF',
     'REMISE',
     'SEPA',
+    'SUR',
     'VIR',
     'VIREMENT',
   ])
@@ -168,7 +178,7 @@ function normalizedGroupToken(value: string): string {
     .replace(/\b\d{4,}\b/g, ' ')
     .replace(/[^A-Z0-9]+/g, ' ')
     .split(/\s+/)
-    .filter((token) => token && !ignoredWords.has(token) && !/^\d+$/.test(token))
+    .filter((token) => token.length > 1 && !ignoredWords.has(token) && !/^\d+$/.test(token))
     .join(' ')
     .trim()
 }
