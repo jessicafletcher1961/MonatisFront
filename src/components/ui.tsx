@@ -1,5 +1,5 @@
-import { AlertTriangle, LoaderCircle, Plus, Sparkles, X, type LucideIcon } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { AlertTriangle, ChevronLeft, ChevronRight, LoaderCircle, Plus, Sparkles, X, type LucideIcon } from 'lucide-react'
+import type { HTMLAttributes, ReactNode } from 'react'
 
 import { cx } from '../lib/cx'
 
@@ -34,7 +34,7 @@ export function QuickAddButton({
   label: string
 }) {
   return (
-    <button type="button" className={cx('inline-action-button', 'preview-tip', className)} data-tooltip={label} aria-label={label} {...props}>
+    <button type="button" className={cx('inline-action-button', 'preview-tip', className)} data-tooltip={label} data-help={label} aria-label={label} {...props}>
       <Plus size={14} />
     </button>
   )
@@ -43,11 +43,16 @@ export function QuickAddButton({
 export function Surface({
   className,
   children,
+  ...props
 }: {
   className?: string
   children: ReactNode
-}) {
-  return <section className={cx('surface', className)}>{children}</section>
+} & HTMLAttributes<HTMLElement>) {
+  return (
+    <section className={cx('surface', className)} {...props}>
+      {children}
+    </section>
+  )
 }
 
 export function PageHeader({
@@ -62,7 +67,7 @@ export function PageHeader({
   actions?: ReactNode
 }) {
   return (
-    <header className="page-header">
+    <header className="page-header" data-help={`Page "${title}" : presente le contexte, les informations et les actions principales de cette section.`}>
       <div className="page-header-copy">
         {eyebrow ? <span className="eyebrow">{eyebrow}</span> : null}
         <h1>{title}</h1>
@@ -83,7 +88,7 @@ export function SectionHeader({
   aside?: ReactNode
 }) {
   return (
-    <div className="section-header">
+    <div className="section-header" data-help={`Section "${title}" : regroupe les informations ou commandes associees a ce bloc.`}>
       <div>
         <h2>{title}</h2>
         {subtitle ? <p>{subtitle}</p> : null}
@@ -113,7 +118,7 @@ export function StatCard({
   hint?: string
 }) {
   return (
-    <Surface className="stat-card">
+    <Surface className="stat-card" data-help={`Indicateur "${title}" : affiche une valeur calculee pour suivre rapidement l'etat de l'ecran.`}>
       <strong>{value}</strong>
       <h3>{title}</h3>
       {hint ? <p>{hint}</p> : null}
@@ -131,11 +136,17 @@ export function SegmentedControl({
   onChange: (value: string) => void
 }) {
   return (
-    <div className="segmented">
+    <div className="segmented" data-help="Selecteur de vue : choisissez l'option qui correspond au type de donnees ou au mode d'affichage voulu.">
       {items.map((item) => {
         const Icon = item.icon
         return (
-          <button key={item.value} type="button" className={cx('segmented-option', value === item.value && 'active')} onClick={() => onChange(item.value)}>
+          <button
+            key={item.value}
+            type="button"
+            className={cx('segmented-option', value === item.value && 'active')}
+            onClick={() => onChange(item.value)}
+            data-help={`Affiche "${item.label}" dans cette zone.`}
+          >
             {Icon ? <Icon size={15} /> : null}
             <span>{item.label}</span>
           </button>
@@ -155,7 +166,7 @@ export function EmptyState({
   action?: ReactNode
 }) {
   return (
-    <Surface className="empty-state">
+    <Surface className="empty-state" data-help={`Etat vide : "${title}". Aucun element ne correspond actuellement a cette zone.`}>
       <div className="empty-icon">
         <Sparkles size={18} />
       </div>
@@ -168,7 +179,7 @@ export function EmptyState({
 
 export function LoadingState({ label = 'Chargement en cours...' }: { label?: string }) {
   return (
-    <Surface className="loading-state">
+    <Surface className="loading-state" data-help="Chargement : les donnees sont en cours de recuperation.">
       <LoaderCircle className="spin" size={18} />
       <span>{label}</span>
     </Surface>
@@ -183,7 +194,7 @@ export function ErrorState({
   message: string
 }) {
   return (
-    <Surface className="error-state">
+    <Surface className="error-state" data-help="Erreur : cette zone indique pourquoi les donnees ou l'action n'ont pas abouti.">
       <div className="empty-icon warning">
         <AlertTriangle size={18} />
       </div>
@@ -205,7 +216,7 @@ export function FormField({
   children: ReactNode
 }) {
   return (
-    <label className="form-field">
+    <label className="form-field" data-help={`Champ "${label}" : renseigne ou modifie cette information dans le formulaire courant.`}>
       <span className="form-field-label">{label}</span>
       {children}
       {hint ? <small className="form-field-hint">{hint}</small> : null}
@@ -228,7 +239,7 @@ export function DataPanel({
   children: ReactNode
 }) {
   return (
-    <Surface className="data-panel">
+    <Surface className="data-panel" data-help={`Panneau "${title}" : regroupe les donnees et actions associees.`}>
       <SectionHeader title={title} subtitle={subtitle} />
       {children}
     </Surface>
@@ -242,6 +253,7 @@ export function OverlayPanel({
   titlePrefix,
   subtitle,
   actions,
+  navigator,
   width = 'wide',
   overlayClassName,
   className,
@@ -255,6 +267,14 @@ export function OverlayPanel({
   titlePrefix?: ReactNode
   subtitle?: string
   actions?: ReactNode
+  navigator?: {
+    label: string
+    title: string
+    previousDisabled?: boolean
+    nextDisabled?: boolean
+    onPrevious: () => void
+    onNext: () => void
+  }
   width?: 'regular' | 'wide'
   overlayClassName?: string
   className?: string
@@ -267,7 +287,7 @@ export function OverlayPanel({
   }
 
   return (
-    <div className={cx('floating-panel-overlay', overlayClassName)} role="dialog" aria-modal="true" aria-label={title ?? 'Panneau'}>
+    <div className={cx('floating-panel-overlay', overlayClassName)} role="dialog" aria-modal="true" aria-label={navigator?.title ?? title ?? 'Panneau'}>
       <button
         type="button"
         className="floating-panel-backdrop"
@@ -277,23 +297,59 @@ export function OverlayPanel({
       />
       <div className={cx('floating-panel-dialog', width === 'regular' ? 'regular' : 'wide')}>
         <Surface className={cx('floating-panel', className)}>
-          <div className="floating-panel-header">
-            <div className="floating-panel-title-block">
-              {title || titlePrefix ? (
-                <div className="floating-panel-title-row">
-                  {titlePrefix}
-                  {title ? <h2>{title}</h2> : null}
-                </div>
-              ) : null}
-              {subtitle ? <p>{subtitle}</p> : null}
-            </div>
-            <div className="floating-panel-actions">
-              {actions}
-              <Button type="button" tone="ghost" className="floating-panel-close" onClick={onClose} aria-label="Fermer">
-                <X size={16} />
+          {navigator ? (
+            <div className="floating-panel-nav-header">
+              <Button
+                type="button"
+                tone="ghost"
+                className="floating-panel-nav-button"
+                onClick={navigator.onPrevious}
+                disabled={navigator.previousDisabled}
+                aria-label="Precedent"
+                data-help="Affiche l'element precedent de la liste actuellement ouverte."
+              >
+                <ChevronLeft size={18} />
               </Button>
+              <div className="floating-panel-nav-title">
+                <span>{navigator.label}</span>
+                <h2 title={navigator.title}>{navigator.title}</h2>
+              </div>
+              <div className="floating-panel-nav-actions">
+                <Button
+                  type="button"
+                  tone="ghost"
+                  className="floating-panel-nav-button"
+                  onClick={navigator.onNext}
+                  disabled={navigator.nextDisabled}
+                  aria-label="Suivant"
+                  data-help="Affiche l'element suivant de la liste actuellement ouverte."
+                >
+                  <ChevronRight size={18} />
+                </Button>
+                <Button type="button" tone="ghost" className="floating-panel-close-text" onClick={onClose} data-help="Ferme ce cadre de detail.">
+                  Fermer
+                </Button>
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="floating-panel-header">
+              <div className="floating-panel-title-block">
+                {title || titlePrefix ? (
+                  <div className="floating-panel-title-row">
+                    {titlePrefix}
+                    {title ? <h2>{title}</h2> : null}
+                  </div>
+                ) : null}
+                {subtitle ? <p>{subtitle}</p> : null}
+              </div>
+              <div className="floating-panel-actions">
+                {actions}
+                <Button type="button" tone="ghost" className="floating-panel-close" onClick={onClose} aria-label="Fermer" data-help="Ferme ce panneau.">
+                  <X size={16} />
+                </Button>
+              </div>
+            </div>
+          )}
           <div className="floating-panel-body">{children}</div>
         </Surface>
         {dialogAccessory}

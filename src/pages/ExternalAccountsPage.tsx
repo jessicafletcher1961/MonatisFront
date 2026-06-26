@@ -5,7 +5,9 @@ import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { useForm, useWatch } from 'react-hook-form'
 import { z } from 'zod'
 
-import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, QuickAddButton, Surface } from '../components/ui'
+import { DEFAULT_CATALOG_PAGE_SIZE } from '../components/pagination-constants'
+import { CatalogPaginationControls } from '../components/pagination-controls'
+import { Button, EmptyState, ErrorState, FormField, LoadingState, OverlayPanel, PageHeader, Surface } from '../components/ui'
 import { cx } from '../lib/cx'
 import { apiErrorMessage, monatisApi } from '../lib/monatis-api'
 import { nullIfBlank } from '../lib/format'
@@ -26,11 +28,19 @@ export function ExternalAccountsPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
   const [search, setSearch] = useState('')
+  const [pageIndex, setPageIndex] = useState(1)
+  const [pageSize, setPageSize] = useState(DEFAULT_CATALOG_PAGE_SIZE)
   const deferredSearch = useDeferredValue(search)
 
   const accountsQuery = useQuery({
-    queryKey: ['comptes', 'externes'],
-    queryFn: () => monatisApi.listExternalAccounts(),
+    queryKey: ['comptes', 'externes', 'page', pageIndex, pageSize, deferredSearch],
+    queryFn: () =>
+      monatisApi.listExternalAccountsPage({
+        numeroPage: pageIndex,
+        taillePage: pageSize,
+        recherche: deferredSearch.trim() || null,
+      }),
+    placeholderData: (previousData) => previousData,
   })
 
   const detailQuery = useQuery({
@@ -71,15 +81,22 @@ export function ExternalAccountsPage() {
     })
   }, [detailQuery.data, form])
 
-  const filteredAccounts = useMemo(() => {
-    const list = accountsQuery.data ?? []
-    const needle = deferredSearch.trim().toLowerCase()
-    if (!needle) {
-      return list
-    }
-
-    return list.filter((account) => [account.identifiant, account.libelle].filter(Boolean).some((value) => String(value).toLowerCase().includes(needle)))
-  }, [accountsQuery.data, deferredSearch])
+  const visibleAccounts = useMemo(() => accountsQuery.data?.comptes ?? [], [accountsQuery.data?.comptes])
+  const accountTotalCount = accountsQuery.data?.totalComptes ?? 0
+  const accountTotalPages = accountsQuery.data?.totalPages ?? 0
+  const accountCurrentPage = accountsQuery.data?.numeroPage ?? pageIndex
+  const accountFirstVisible = accountsQuery.data?.premierElement ?? 0
+  const accountLastVisible = accountsQuery.data?.dernierElement ?? 0
+  const selectedAccountIndex = useMemo(
+    () => (selectedId ? visibleAccounts.findIndex((account) => account.identifiant === selectedId) : -1),
+    [selectedId, visibleAccounts],
+  )
+  const selectedAccountPosition = selectedAccountIndex >= 0 ? selectedAccountIndex + 1 : 0
+  const selectedAccountForDisplay = useMemo(
+    () => visibleAccounts.find((account) => account.identifiant === selectedId) ?? detailQuery.data ?? null,
+    [detailQuery.data, selectedId, visibleAccounts],
+  )
+  const selectedAccountTitle = selectedAccountForDisplay?.libelle?.trim() || selectedAccountForDisplay?.identifiant || selectedId || 'Compte externe'
 
   const createMutation = useMutation({
     mutationFn: (values: ExternalAccountFormValues) =>
@@ -135,50 +152,81 @@ export function ExternalAccountsPage() {
         }
       />
 
-      {accountsQuery.isLoading ? <LoadingState label="Chargement des comptes externes..." /> : null}
+      {accountsQuery.isLoading && !accountsQuery.data ? <LoadingState label="Chargement des comptes externes..." /> : null}
       {hasError ? <ErrorState message={apiErrorMessage(hasError)} /> : null}
 
       <Surface className="catalog-panel">
-        <FilterBar>
-          <div className="search-action-row">
-            <label className="search-field">
+        <div className="operation-filter-stack">
+          <div className="operation-search-pagination-row">
+            <label className="search-field operation-history-search">
               <Search size={16} />
-              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Rechercher un compte externe..." />
+              <input
+                value={search}
+                onChange={(event) => {
+                  setSearch(event.target.value)
+                  setPageIndex(1)
+                }}
+                placeholder="Rechercher un compte externe..."
+              />
             </label>
-            <QuickAddButton
-              label="Creer un nouveau compte externe"
-              onClick={() => {
-                setCreateOpen(true)
-                setSelectedId(null)
+
+            <CatalogPaginationControls
+              ariaLabel="Pagination des comptes externes haut"
+              totalCount={accountTotalCount}
+              firstVisible={accountFirstVisible}
+              lastVisible={accountLastVisible}
+              currentPage={accountCurrentPage}
+              totalPages={accountTotalPages}
+              pageSize={pageSize}
+              pageSizeLabel="Nombre de comptes externes affiches"
+              onPageChange={setPageIndex}
+              onPageSizeChange={(size) => {
+                setPageSize(size)
+                setPageIndex(1)
               }}
             />
           </div>
-        </FilterBar>
+        </div>
 
-        {!filteredAccounts.length ? (
+        {!visibleAccounts.length ? (
           <EmptyState title="Aucun compte externe" description="Ajoute un compte pour demarrer." />
         ) : (
-          <div className="catalog-grid">
-            {filteredAccounts.map((account) => (
+          <div className="operation-history-list compact-entity-list">
+            {visibleAccounts.map((account) => (
               <button
                 key={account.identifiant}
                 type="button"
-                className={cx('catalog-card', selectedId === account.identifiant && 'selected')}
+                className={cx('operation-history-row compact-entity-row external-account-row', selectedId === account.identifiant && 'selected')}
                 onClick={() => {
                   setSelectedId(account.identifiant)
                 }}
               >
-                <div className="catalog-card-head">
-                  <div>
-                    <strong>{account.identifiant}</strong>
-                    <p>{account.libelle ?? 'Sans libelle'}</p>
-                  </div>
-                  <Badge>Externe</Badge>
+                <div className="operation-history-main">
+                  <strong title={account.identifiant}>{account.identifiant}</strong>
+                  <span title={account.libelle ?? 'Sans libelle'}>{account.libelle ?? 'Sans libelle'}</span>
                 </div>
+                <div className="operation-history-reference">Compte externe</div>
               </button>
             ))}
           </div>
         )}
+
+        <CatalogPaginationControls
+          ariaLabel="Pagination des comptes externes bas"
+          totalCount={accountTotalCount}
+          firstVisible={accountFirstVisible}
+          lastVisible={accountLastVisible}
+          currentPage={accountCurrentPage}
+          totalPages={accountTotalPages}
+          pageSize={pageSize}
+          position="bottom"
+          pageSizeLabel="Nombre de comptes externes affiches"
+          onPageChange={setPageIndex}
+          onPageSizeChange={(size) => {
+            setPageSize(size)
+            setPageIndex(1)
+          }}
+        />
       </Surface>
 
       <OverlayPanel open={createOpen} onClose={() => setCreateOpen(false)} title="Nouveau compte externe" width="regular">
@@ -208,23 +256,25 @@ export function ExternalAccountsPage() {
       <OverlayPanel
         open={Boolean(selectedId)}
         onClose={() => setSelectedId(null)}
-        title={selectedId ?? 'Compte externe'}
         width="regular"
-        actions={
-          selectedId ? (
-            <Button
-              tone="danger"
-              onClick={() => {
-                if (window.confirm(`Supprimer ${selectedId} ?`)) {
-                  void deleteMutation.mutateAsync()
-                }
-              }}
-            >
-              <Trash2 size={16} />
-              Supprimer
-            </Button>
-          ) : null
-        }
+        navigator={{
+          label: `Compte externe ${selectedAccountPosition || 0}/${visibleAccounts.length}`,
+          title: selectedAccountTitle,
+          previousDisabled: selectedAccountIndex <= 0,
+          nextDisabled: selectedAccountIndex < 0 || selectedAccountIndex >= visibleAccounts.length - 1,
+          onPrevious: () => {
+            const account = visibleAccounts[selectedAccountIndex - 1]
+            if (account) {
+              setSelectedId(account.identifiant)
+            }
+          },
+          onNext: () => {
+            const account = visibleAccounts[selectedAccountIndex + 1]
+            if (account) {
+              setSelectedId(account.identifiant)
+            }
+          },
+        }}
       >
         {!selectedId ? null : detailQuery.isLoading ? (
           <LoadingState label="Chargement..." />
@@ -249,27 +299,45 @@ export function ExternalAccountsPage() {
               </div>
             </div>
 
-            {form.formState.isDirty ? (
-              <div className="button-row operation-edit-actions">
-                <Button
-                  type="button"
-                  tone="ghost"
-                  disabled={updateMutation.isPending}
-                  onClick={() =>
-                    form.reset({
-                      identifiant: detailQuery.data.identifiant,
-                      libelle: detailQuery.data.libelle ?? '',
-                    })
-                  }
-                >
-                  Annuler
-                </Button>
-                <Button type="submit" disabled={updateMutation.isPending}>
-                  <Save size={16} />
-                  Modifier
-                </Button>
+            <div className="detail-footer-actions">
+              <div className="detail-footer-primary">
+                {form.formState.isDirty ? (
+                  <>
+                    <Button
+                      type="button"
+                      tone="ghost"
+                      disabled={updateMutation.isPending}
+                      onClick={() =>
+                        form.reset({
+                          identifiant: detailQuery.data.identifiant,
+                          libelle: detailQuery.data.libelle ?? '',
+                        })
+                      }
+                    >
+                      Annuler
+                    </Button>
+                    <Button type="submit" disabled={updateMutation.isPending}>
+                      <Save size={16} />
+                      Modifier
+                    </Button>
+                  </>
+                ) : null}
               </div>
-            ) : null}
+              <Button
+                type="button"
+                tone="danger"
+                className="detail-delete-button"
+                disabled={deleteMutation.isPending}
+                onClick={() => {
+                  if (selectedId && window.confirm(`Supprimer ${selectedAccountTitle} ?`)) {
+                    void deleteMutation.mutateAsync()
+                  }
+                }}
+              >
+                <Trash2 size={16} />
+                Supprimer
+              </Button>
+            </div>
           </form>
         )}
       </OverlayPanel>

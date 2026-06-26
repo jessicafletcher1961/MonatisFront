@@ -1,0 +1,2 @@
+export const CATALOG_PAGE_SIZE_OPTIONS = [25, 50, 100, 200]
+export const DEFAULT_CATALOG_PAGE_SIZE = 50

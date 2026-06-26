@@ -1,14 +1,14 @@
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useFieldArray, useForm, useWatch } from 'react-hook-form'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Pencil, Plus, Save, Search, Trash2, Upload, X } from 'lucide-react'
+import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Plus, Save, Search, Trash2, Upload, X } from 'lucide-react'
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { z } from 'zod'
 
-import { QuickAccountOverlay, QuickReferenceOverlay, type QuickAccountDialogState, type QuickReferenceDialogState } from '../components/quick-create'
+import { QuickAccountOverlay, QuickReferenceOverlay, type QuickAccountDialogState, type QuickAccountKind, type QuickReferenceDialogState } from '../components/quick-create'
 import { StatementImportOverlay } from '../components/statement-import'
-import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, QuickAddButton, SectionHeader, Surface } from '../components/ui'
+import { Badge, Button, EmptyState, ErrorState, FormField, LoadingState, OverlayPanel, PageHeader, QuickAddButton, SectionHeader, Surface } from '../components/ui'
 import { cx } from '../lib/cx'
 import { formatCurrencyFromCents, formatDate, nullIfBlank, parseMoneyToCents, toMoneyInput, todayIso } from '../lib/format'
 import { apiErrorMessage, type CompteSummary, type OperationBasic, type OperationLinePayload, type OperationPageRequest, type ReferenceListItem, type TypeOperation, monatisApi } from '../lib/monatis-api'
@@ -24,7 +24,6 @@ const operationLineSchema = z.object({
 })
 
 const createSchema = z.object({
-  numero: z.string().optional(),
   libelle: z.string().optional(),
   codeTypeOperation: z.string().trim().min(1, 'Le type est obligatoire.'),
   dateValeur: z.string().optional(),
@@ -55,10 +54,21 @@ type CreateOperationInput = {
   values: CreateFormValues
   continueWithSameSettings: boolean
 }
-type CreateStep = 'type' | 'depense' | 'recette' | 'amount' | 'review'
+type CreateStep = 'account-type' | 'account' | 'type' | 'counterparty' | 'amount' | 'review'
 type QuickEditTarget = 'type' | 'depense' | 'recette' | 'amount' | null
+type AccountField = 'depense' | 'recette'
+type AccountTypeChoice = 'COURANT' | 'FINANCIER' | 'BIEN' | 'EXTERNE' | 'TECHNIQUE'
 type OperationTypeGroup = 'incoming' | 'outgoing' | 'internal' | 'technical' | 'other'
+type OperationFilterPicker = 'type' | 'account-type' | 'account' | 'beneficiary' | 'date' | 'amount' | null
+type RangeFilterValue = { from: string; to: string }
 type SubCategoryPickerTarget =
+  | { kind: 'create' }
+  | { kind: 'createLine'; index: number }
+  | { kind: 'newCreateLine' }
+  | { kind: 'line'; index: number }
+  | { kind: 'newLine' }
+  | null
+type BeneficiaryPickerTarget =
   | { kind: 'create' }
   | { kind: 'createLine'; index: number }
   | { kind: 'newCreateLine' }
@@ -67,7 +77,6 @@ type SubCategoryPickerTarget =
   | null
 
 const CREATE_DEFAULTS: CreateFormValues = {
-  numero: '',
   libelle: '',
   codeTypeOperation: '',
   dateValeur: todayIso(),
@@ -87,8 +96,18 @@ const OPERATION_TYPE_GROUP_META: Array<{ key: OperationTypeGroup; label: string 
   { key: 'other', label: 'Autre' },
 ]
 
+const ACCOUNT_TYPE_META: Array<{ key: AccountTypeChoice; label: string; description: string }> = [
+  { key: 'COURANT', label: 'Courant', description: 'Banque, caisse, compte courant' },
+  { key: 'FINANCIER', label: 'Financier', description: 'Placement, epargne, investissement' },
+  { key: 'BIEN', label: 'Bien', description: 'Maison, voiture, objet suivi' },
+  { key: 'EXTERNE', label: 'Externe', description: 'Commerce, organisme, personne externe' },
+  { key: 'TECHNIQUE', label: 'Technique', description: 'Frais et remunerations' },
+]
+
 const OPERATION_PAGE_SIZE_OPTIONS = [25, 50, 100, 200]
 const DEFAULT_OPERATION_PAGE_SIZE = 50
+const ADVANCED_OPERATION_FETCH_PAGE_SIZE = 200
+const HIDDEN_CREATE_OPERATION_TYPES = new Set(['INVEST', 'LIQUID'])
 
 function operationTypeCode(operation: OperationBasic): string {
   return operation.codeTypeOperation ?? operation.typeOperation?.code ?? ''
@@ -106,25 +125,10 @@ function accountChoiceLabel(account: CompteSummary): string {
   return `${account.identifiant}${account.libelle ? ` · ${account.libelle}` : ''}`
 }
 
-function operationPageSearchPayload(value: string): Pick<OperationPageRequest, 'recherche' | 'depuisLe' | 'jusqueAu' | 'montantEnCentimes'> {
+function operationPageSearchPayload(value: string): Pick<OperationPageRequest, 'recherche'> {
   const needle = value.trim()
   if (!needle) {
     return {}
-  }
-
-  const isoDateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(needle)
-  if (isoDateMatch) {
-    return { depuisLe: needle, jusqueAu: needle }
-  }
-
-  const frenchDateMatch = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(needle)
-  if (frenchDateMatch) {
-    const iso = `${frenchDateMatch[3]}-${frenchDateMatch[2]}-${frenchDateMatch[1]}`
-    return { depuisLe: iso, jusqueAu: iso }
-  }
-
-  if (/[,.€]/.test(needle) && /^-?\d+(?:[,.]\d{1,2})?\s*€?$/.test(needle)) {
-    return { montantEnCentimes: Math.abs(parseMoneyToCents(needle.replace('€', ''))) }
   }
 
   return { recherche: needle }
@@ -143,10 +147,14 @@ function subCategoryNameForLine(line: OperationBasic['lignes'][number]): string 
   return line.nomSousCategorie?.trim() || line.sousCategorie?.nom?.trim() || ''
 }
 
-function makeOperationLineValues(date: string): OperationLineFormValues {
+function lineDisplayTitle(index: number, numeroLigne?: number | null): string {
+  return `Ligne ${numeroLigne ?? index}`
+}
+
+function makeOperationLineValues(date: string, index?: number): OperationLineFormValues {
   return {
     numeroLigne: null,
-    libelle: '',
+    libelle: index == null ? '' : lineDisplayTitle(index),
     dateComptabilisation: date,
     montant: '',
     nomSousCategorie: '',
@@ -221,7 +229,7 @@ function sumOperationLineValues(lines: Array<Partial<OperationLineFormValues> | 
   }, 0)
 }
 
-function primaryLineIndex(lines: Array<Partial<OperationLineFormValues> | undefined>): number {
+function primaryLineIndex(lines: Array<{ numeroLigne?: number | null } | undefined>): number {
   if (!lines.length) {
     return -1
   }
@@ -416,12 +424,309 @@ function selectedAccountLabel(accounts: CompteSummary[], identifiant: string): s
   return accounts.find((account) => account.identifiant === identifiant)?.identifiant ?? identifiant
 }
 
-function compactOperationMeta(operation: OperationBasic): string {
-  return [operation.numero, formatDate(operation.dateValeur)].join(' · ')
+function internalAccountsByType(internalAccounts: CompteSummary[], codeTypeFonctionnement: string): CompteSummary[] {
+  return internalAccounts.filter((account) => account.codeTypeFonctionnement === codeTypeFonctionnement)
+}
+
+function compatibleAccountOptionsForField(
+  codeTypeOperation: string,
+  field: 'depense' | 'recette',
+  internalAccounts: CompteSummary[],
+  externalAccounts: CompteSummary[],
+  technicalAccounts: CompteSummary[],
+): CompteSummary[] {
+  const courantAccounts = internalAccountsByType(internalAccounts, 'COURANT')
+  const financierAccounts = internalAccountsByType(internalAccounts, 'FINANCIER')
+  const bienAccounts = internalAccountsByType(internalAccounts, 'BIEN')
+
+  switch (codeTypeOperation) {
+    case 'RECETTE':
+      return field === 'depense' ? externalAccounts : courantAccounts
+    case 'DEPENSE':
+      return field === 'depense' ? courantAccounts : externalAccounts
+    case 'TRANSFERT':
+      return courantAccounts
+    case 'DEPOT':
+    case 'INVEST':
+      return field === 'depense' ? courantAccounts : financierAccounts
+    case 'RETRAIT':
+    case 'LIQUID':
+      return field === 'depense' ? financierAccounts : courantAccounts
+    case 'ACHAT':
+      return field === 'depense' ? externalAccounts : bienAccounts
+    case 'VENTE':
+      return field === 'depense' ? bienAccounts : externalAccounts
+    case 'COURANT+':
+      return field === 'depense' ? technicalAccounts : courantAccounts
+    case 'COURANT-':
+      return field === 'depense' ? courantAccounts : technicalAccounts
+    case 'FINANCIER+':
+      return field === 'depense' ? technicalAccounts : financierAccounts
+    case 'FINANCIER-':
+      return field === 'depense' ? financierAccounts : technicalAccounts
+    case 'BIEN+':
+      return field === 'depense' ? technicalAccounts : bienAccounts
+    case 'BIEN-':
+      return field === 'depense' ? bienAccounts : technicalAccounts
+    default:
+      return [...internalAccounts, ...externalAccounts, ...technicalAccounts]
+  }
+}
+
+function accountOptionsWithCurrent(options: CompteSummary[], currentIdentifiant: string, allAccounts: CompteSummary[]): CompteSummary[] {
+  if (!currentIdentifiant || options.some((account) => account.identifiant === currentIdentifiant)) {
+    return options
+  }
+
+  const knownAccount = allAccounts.find((account) => account.identifiant === currentIdentifiant)
+  return [...options, knownAccount ?? { identifiant: currentIdentifiant, libelle: null }]
+}
+
+function accountsForTypeChoice(
+  choice: AccountTypeChoice,
+  internalAccounts: CompteSummary[],
+  externalAccounts: CompteSummary[],
+  technicalAccounts: CompteSummary[],
+): CompteSummary[] {
+  if (choice === 'EXTERNE') {
+    return externalAccounts
+  }
+
+  if (choice === 'TECHNIQUE') {
+    return technicalAccounts
+  }
+
+  return internalAccountsByType(internalAccounts, choice)
+}
+
+function accountTypeChoiceForAccount(
+  account: CompteSummary | null | undefined,
+  internalIds: Set<string>,
+  externalIds: Set<string>,
+  technicalIds: Set<string>,
+): AccountTypeChoice | null {
+  if (!account) {
+    return null
+  }
+
+  if (externalIds.has(account.identifiant)) {
+    return 'EXTERNE'
+  }
+
+  if (technicalIds.has(account.identifiant)) {
+    return 'TECHNIQUE'
+  }
+
+  if (internalIds.has(account.identifiant) && ['COURANT', 'FINANCIER', 'BIEN'].includes(account.codeTypeFonctionnement ?? '')) {
+    return account.codeTypeFonctionnement as AccountTypeChoice
+  }
+
+  return null
+}
+
+function accountKindForTypeChoice(choice: AccountTypeChoice): QuickAccountKind {
+  if (choice === 'EXTERNE') {
+    return 'externe'
+  }
+
+  if (choice === 'TECHNIQUE') {
+    return 'technique'
+  }
+
+  return 'interne'
+}
+
+function accountTypeLabel(choice: AccountTypeChoice): string {
+  return ACCOUNT_TYPE_META.find((item) => item.key === choice)?.label ?? choice
+}
+
+function compactFilterLabel(values: string[], emptyLabel: string, singleLabel?: string): string {
+  if (!values.length) {
+    return emptyLabel
+  }
+
+  if (values.length === 1) {
+    return singleLabel ?? values[0]
+  }
+
+  return `${values.length} selectionnes`
+}
+
+function beneficiarySelectionLabel(values: string[]): string {
+  return compactFilterLabel(values, 'Choisir')
+}
+
+function activeRangeFilters(values: RangeFilterValue[]): RangeFilterValue[] {
+  return values.filter((item) => item.from.trim() || item.to.trim())
+}
+
+function normalizeRangeRows(values: RangeFilterValue[]): RangeFilterValue[] {
+  const activeRows = activeRangeFilters(values)
+  return [...activeRows, { from: '', to: '' }]
+}
+
+function wholeEuroToCents(value: string, rangeEnd = false): number | null {
+  const normalized = value.trim().replace(/\s/g, '').replace('€', '').replace(',', '.')
+  if (!normalized) {
+    return null
+  }
+
+  const parsed = Number(normalized)
+  if (!Number.isFinite(parsed)) {
+    return null
+  }
+
+  const wholeEuro = Math.trunc(Math.abs(parsed))
+  return wholeEuro * 100 + (rangeEnd ? 99 : 0)
+}
+
+function amountFilterLabel(filter: RangeFilterValue): string {
+  const from = filter.from.trim()
+  const to = filter.to.trim()
+
+  if (from && to) {
+    return `${from} - ${to} €`
+  }
+
+  return `${from || to} €`
+}
+
+async function fetchAllOperationPages(request: OperationPageRequest): Promise<OperationBasic[]> {
+  const firstPage = await monatisApi.listOperationsPage({
+    ...request,
+    numeroPage: 1,
+    taillePage: ADVANCED_OPERATION_FETCH_PAGE_SIZE,
+  })
+  const operations = [...firstPage.operations]
+
+  for (let page = 2; page <= firstPage.totalPages; page += 1) {
+    const nextPage = await monatisApi.listOperationsPage({
+      ...request,
+      numeroPage: page,
+      taillePage: ADVANCED_OPERATION_FETCH_PAGE_SIZE,
+    })
+    operations.push(...nextPage.operations)
+  }
+
+  return operations
+}
+
+function operationMatchesSearch(operation: OperationBasic, searchValue: string, accountById: Map<string, CompteSummary>): boolean {
+  const needle = searchValue.trim()
+  if (!needle) {
+    return true
+  }
+
+  const depense = depenseId(operation)
+  const recette = recetteId(operation)
+  const haystack = [
+    operation.numero,
+    operation.libelle,
+    readableOperationLabel(operation),
+    operationAccountingDate(operation),
+    formatDate(operationAccountingDate(operation)),
+    formatCurrencyFromCents(operation.montantEnCentimes),
+    depense,
+    recette,
+    operation.compteDepense?.libelle,
+    operation.compteRecette?.libelle,
+    accountById.get(depense)?.libelle,
+    accountById.get(recette)?.libelle,
+  ]
+    .filter(Boolean)
+    .join(' ')
+
+  return matchesNeedle(haystack, needle)
+}
+
+function operationMatchesDates(operation: OperationBasic, filters: RangeFilterValue[]): boolean {
+  const activeFilters = activeRangeFilters(filters)
+  if (!activeFilters.length) {
+    return true
+  }
+
+  const dateComptabilisation = operationAccountingDate(operation)
+  if (!dateComptabilisation) {
+    return false
+  }
+
+  return activeFilters.some((filter) => {
+    const left = filter.from || filter.to
+    const right = filter.to || filter.from
+    if (!left || !right) {
+      return false
+    }
+
+    const start = left <= right ? left : right
+    const end = left <= right ? right : left
+    return dateComptabilisation >= start && dateComptabilisation <= end
+  })
+}
+
+function operationMatchesAmounts(operation: OperationBasic, filters: RangeFilterValue[]): boolean {
+  const activeFilters = activeRangeFilters(filters)
+  if (!activeFilters.length) {
+    return true
+  }
+
+  return activeFilters.some((filter) => {
+    const minimum = wholeEuroToCents(filter.from || filter.to)
+    const maximum = filter.to ? wholeEuroToCents(filter.to, true) : filter.from ? wholeEuroToCents(filter.from, true) : null
+
+    if (minimum == null && maximum == null) {
+      return true
+    }
+
+    const start = minimum ?? maximum ?? 0
+    const end = maximum ?? minimum ?? 0
+    return operation.montantEnCentimes >= Math.min(start, end) && operation.montantEnCentimes <= Math.max(start, end)
+  })
+}
+
+function accountTypeChoicesFromOptions(
+  options: CompteSummary[],
+  internalIds: Set<string>,
+  externalIds: Set<string>,
+  technicalIds: Set<string>,
+): AccountTypeChoice[] {
+  const choices = new Set<AccountTypeChoice>()
+
+  options.forEach((account) => {
+    const choice = accountTypeChoiceForAccount(account, internalIds, externalIds, technicalIds)
+    if (choice) {
+      choices.add(choice)
+    }
+  })
+
+  return ACCOUNT_TYPE_META.map((item) => item.key).filter((choice) => choices.has(choice))
+}
+
+function operationDetailTitle(operation: OperationBasic): string {
+  const directLabel = operation.libelle?.trim()
+  if (directLabel) {
+    return directLabel
+  }
+
+  const lineLabel = operation.lignes.find((line) => line.libelle?.trim())?.libelle?.trim()
+  return lineLabel || 'Operation sans libelle'
 }
 
 function operationHistoryMeta(operation: OperationBasic): string {
-  return formatDate(operation.dateValeur)
+  return formatDate(operationAccountingDate(operation))
+}
+
+function operationAccountingDate(operation: OperationBasic): string {
+  const primaryIndex = primaryLineIndex(operation.lignes)
+  return operation.lignes[primaryIndex]?.dateComptabilisation || operation.dateValeur
+}
+
+function compareOperationsByAccountingDate(left: OperationBasic, right: OperationBasic): number {
+  const dateGap = operationAccountingDate(right).localeCompare(operationAccountingDate(left))
+  if (dateGap !== 0) {
+    return dateGap
+  }
+
+  return left.numero.localeCompare(right.numero)
 }
 
 function operationHistoryReferenceLabel(summary: ReturnType<typeof operationReferenceSummary>): string {
@@ -444,11 +749,32 @@ function previewTip(label: string, value: string): string {
 
 function operationAccountKinds(
   codeType: string,
-  step: 'depense' | 'recette',
+  step: AccountField,
   options: CompteSummary[],
   internalIds: Set<string>,
   externalIds: Set<string>,
-): Array<'interne' | 'externe'> {
+  technicalIds: Set<string>,
+): QuickAccountKind[] {
+  const inferredKinds = new Set<QuickAccountKind>()
+
+  options.forEach((account) => {
+    if (internalIds.has(account.identifiant)) {
+      inferredKinds.add('interne')
+    }
+
+    if (externalIds.has(account.identifiant)) {
+      inferredKinds.add('externe')
+    }
+
+    if (technicalIds.has(account.identifiant)) {
+      inferredKinds.add('technique')
+    }
+  })
+
+  if (inferredKinds.size) {
+    return Array.from(inferredKinds)
+  }
+
   const group = operationTypeGroup(codeType)
 
   if (group === 'incoming') {
@@ -463,32 +789,32 @@ function operationAccountKinds(
     return ['interne']
   }
 
-  const inferredKinds = new Set<'interne' | 'externe'>()
+  if (group === 'technical') {
+    return step === 'depense' ? ['interne', 'technique'] : ['interne', 'technique']
+  }
 
-  options.forEach((account) => {
-    if (internalIds.has(account.identifiant)) {
-      inferredKinds.add('interne')
-    }
-
-    if (externalIds.has(account.identifiant)) {
-      inferredKinds.add('externe')
-    }
-  })
-
-  return inferredKinds.size ? Array.from(inferredKinds) : ['interne', 'externe']
+  return ['interne', 'externe', 'technique']
 }
 
-function quickAccountLabel(kinds: Array<'interne' | 'externe'>): string {
+function quickAccountLabel(kinds: QuickAccountKind[], internalType?: AccountTypeChoice | ''): string {
   if (kinds.length === 1) {
-    return kinds[0] === 'interne' ? 'Creer un compte interne' : 'Creer un compte externe'
+    if (kinds[0] === 'interne') {
+      return internalType && internalType !== 'EXTERNE' && internalType !== 'TECHNIQUE' ? `Creer un compte ${accountTypeLabel(internalType).toLowerCase()}` : 'Creer un compte interne'
+    }
+
+    return kinds[0] === 'externe' ? 'Creer un compte externe' : 'Creer un compte technique'
   }
 
   return 'Creer un nouveau compte'
 }
 
-function quickAccountTitle(kinds: Array<'interne' | 'externe'>): string {
+function quickAccountTitle(kinds: QuickAccountKind[], internalType?: AccountTypeChoice | ''): string {
   if (kinds.length === 1) {
-    return kinds[0] === 'interne' ? 'Nouveau compte interne' : 'Nouveau compte externe'
+    if (kinds[0] === 'interne') {
+      return internalType && internalType !== 'EXTERNE' && internalType !== 'TECHNIQUE' ? `Nouveau compte ${accountTypeLabel(internalType).toLowerCase()}` : 'Nouveau compte interne'
+    }
+
+    return kinds[0] === 'externe' ? 'Nouveau compte externe' : 'Nouveau compte technique'
   }
 
   return 'Nouveau compte'
@@ -501,19 +827,28 @@ export function OperationsPage() {
   const [selectedNumero, setSelectedNumero] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [selectedTypeFilters, setSelectedTypeFilters] = useState<string[]>([])
+  const [selectedAccountTypeFilters, setSelectedAccountTypeFilters] = useState<AccountTypeChoice[]>([])
+  const [selectedAccountFilters, setSelectedAccountFilters] = useState<string[]>([])
+  const [selectedBeneficiaryFilters, setSelectedBeneficiaryFilters] = useState<string[]>([])
+  const [dateFilters, setDateFilters] = useState<RangeFilterValue[]>([{ from: '', to: '' }])
+  const [amountFilters, setAmountFilters] = useState<RangeFilterValue[]>([{ from: '', to: '' }])
   const [operationPageIndex, setOperationPageIndex] = useState(1)
   const [operationPageSize, setOperationPageSize] = useState(DEFAULT_OPERATION_PAGE_SIZE)
-  const [typeFilterPickerOpen, setTypeFilterPickerOpen] = useState(false)
-  const [typeFilterSearch, setTypeFilterSearch] = useState('')
+  const [operationFilterPicker, setOperationFilterPicker] = useState<OperationFilterPicker>(null)
+  const [accountFilterSearch, setAccountFilterSearch] = useState('')
+  const [beneficiaryFilterSearch, setBeneficiaryFilterSearch] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
   const [statementImportOpen, setStatementImportOpen] = useState(false)
-  const [createStep, setCreateStep] = useState<CreateStep>('type')
-  const [createOptionsOpen, setCreateOptionsOpen] = useState(false)
+  const [createStep, setCreateStep] = useState<CreateStep>('account-type')
+  const [createPrimaryAccountType, setCreatePrimaryAccountType] = useState<AccountTypeChoice | ''>('')
+  const [createPrimaryAccountId, setCreatePrimaryAccountId] = useState('')
+  const [createPrimaryRole, setCreatePrimaryRole] = useState<AccountField | ''>('')
   const [expandedCreateLineIndex, setExpandedCreateLineIndex] = useState<number | null>(null)
   const [createLineCreateOpen, setCreateLineCreateOpen] = useState(false)
   const [createLineBaselines, setCreateLineBaselines] = useState<OperationLineFormValues[]>([])
   const [quickEditTarget, setQuickEditTarget] = useState<QuickEditTarget>(null)
-  const [typeSearch, setTypeSearch] = useState('')
+  const [accountSearch, setAccountSearch] = useState('')
+  const [counterpartySearch, setCounterpartySearch] = useState('')
   const [depenseSearch, setDepenseSearch] = useState('')
   const [recetteSearch, setRecetteSearch] = useState('')
   const [expandedLineIndex, setExpandedLineIndex] = useState<number | null>(null)
@@ -523,34 +858,23 @@ export function OperationsPage() {
   const [openCategoryNames, setOpenCategoryNames] = useState<string[]>([])
   const [subCategoryPickerTarget, setSubCategoryPickerTarget] = useState<SubCategoryPickerTarget>(null)
   const [subCategorySearch, setSubCategorySearch] = useState('')
+  const [beneficiaryPickerTarget, setBeneficiaryPickerTarget] = useState<BeneficiaryPickerTarget>(null)
+  const [beneficiaryPickerSearch, setBeneficiaryPickerSearch] = useState('')
   const [quickReferenceDialog, setQuickReferenceDialog] = useState<QuickReferenceDialogState | null>(null)
   const [quickAccountDialog, setQuickAccountDialog] = useState<QuickAccountDialogState | null>(null)
   const amountInputRef = useRef<HTMLInputElement | null>(null)
   const quickAmountInputRef = useRef<HTMLInputElement | null>(null)
-  const createOptionsPanelRef = useRef<HTMLDivElement | null>(null)
   const createLineCardRefs = useRef<Array<HTMLDivElement | null>>([])
   const lineCardRefs = useRef<Array<HTMLDivElement | null>>([])
   const deferredSearch = useDeferredValue(search)
-  const deferredTypeSearch = useDeferredValue(typeSearch)
+  const deferredAccountSearch = useDeferredValue(accountSearch)
+  const deferredCounterpartySearch = useDeferredValue(counterpartySearch)
   const deferredDepenseSearch = useDeferredValue(depenseSearch)
   const deferredRecetteSearch = useDeferredValue(recetteSearch)
-  const deferredTypeFilterSearch = useDeferredValue(typeFilterSearch)
+  const deferredAccountFilterSearch = useDeferredValue(accountFilterSearch)
+  const deferredBeneficiaryFilterSearch = useDeferredValue(beneficiaryFilterSearch)
   const deferredSubCategorySearch = useDeferredValue(subCategorySearch)
-  const operationPageRequest = useMemo<OperationPageRequest>(
-    () => ({
-      numeroPage: operationPageIndex,
-      taillePage: operationPageSize,
-      ...operationPageSearchPayload(deferredSearch),
-      codesTypeOperation: selectedTypeFilters.length ? selectedTypeFilters : null,
-    }),
-    [deferredSearch, operationPageIndex, operationPageSize, selectedTypeFilters],
-  )
-
-  const operationsQuery = useQuery({
-    queryKey: ['operations', 'page', operationPageRequest],
-    queryFn: () => monatisApi.listOperationsPage(operationPageRequest),
-  })
-
+  const deferredBeneficiaryPickerSearch = useDeferredValue(beneficiaryPickerSearch)
   const detailQuery = useQuery({
     queryKey: ['operations', selectedNumero],
     queryFn: () => monatisApi.getOperation(selectedNumero!),
@@ -633,7 +957,6 @@ export function OperationsPage() {
   const createAmount = useWatch({ control: createForm.control, name: 'montant' }) ?? ''
   const createDepense = useWatch({ control: createForm.control, name: 'identifiantCompteDepense' }) ?? ''
   const createRecette = useWatch({ control: createForm.control, name: 'identifiantCompteRecette' }) ?? ''
-  const createNumero = useWatch({ control: createForm.control, name: 'numero' }) ?? ''
   const createLibelle = useWatch({ control: createForm.control, name: 'libelle' }) ?? ''
   const createDateValeur = useWatch({ control: createForm.control, name: 'dateValeur' }) ?? todayIso()
   const createNomSousCategorie = useWatch({ control: createForm.control, name: 'nomSousCategorie' }) ?? ''
@@ -646,7 +969,6 @@ export function OperationsPage() {
   const editDepense = useWatch({ control: editForm.control, name: 'identifiantCompteDepense' }) ?? ''
   const editRecette = useWatch({ control: editForm.control, name: 'identifiantCompteRecette' }) ?? ''
   const editDateValeur = useWatch({ control: editForm.control, name: 'dateValeur' }) ?? ''
-  const editNumero = useWatch({ control: editForm.control, name: 'numero' }) ?? ''
   const editLibelle = useWatch({ control: editForm.control, name: 'libelle' }) ?? ''
   const editPointee = useWatch({ control: editForm.control, name: 'pointee' }) ?? false
   const watchedEditLines = useWatch({ control: editForm.control, name: 'lignes' })
@@ -665,6 +987,18 @@ export function OperationsPage() {
     queryKey: ['operations', 'compat', createType],
     queryFn: () => monatisApi.getOperationCompatibilitiesByType(createType),
     enabled: Boolean(createType),
+  })
+
+  const createPrimaryCompatQuery = useQuery({
+    queryKey: ['operations', 'compat', 'types', createPrimaryAccountId],
+    queryFn: () => monatisApi.getOperationCompatibleTypesByAccount(createPrimaryAccountId),
+    enabled: Boolean(createOpen && createPrimaryAccountId),
+  })
+
+  const refinedDepenseQuery = useQuery({
+    queryKey: ['operations', 'compat', 'depense', createType, createRecette],
+    queryFn: () => monatisApi.getOperationCompatibleDepenseByRecette(createType, createRecette),
+    enabled: Boolean(createType && createRecette && compatQuery.data?.comptesCompatiblesDepense),
   })
 
   const refinedRecetteQuery = useQuery({
@@ -708,34 +1042,20 @@ export function OperationsPage() {
   const technicalFallbackId = technicalAccountFallback(technicalAccountsQuery.data ?? [])
 
   useEffect(() => {
-    if (!createType || !compatQuery.data || !technicalFallbackId) {
+    if (!createType || createStep !== 'counterparty' || !compatQuery.data || !technicalFallbackId || !createPrimaryRole) {
       return
     }
 
-    if (createStep === 'depense' && compatQuery.data.comptesCompatiblesDepense === null) {
-      if (createDepense !== technicalFallbackId) {
-        createForm.setValue('identifiantCompteDepense', technicalFallbackId)
-      }
-
-      if (compatQuery.data.comptesCompatiblesRecette === null) {
-        if (createRecette !== technicalFallbackId) {
-          createForm.setValue('identifiantCompteRecette', technicalFallbackId)
-        }
-        window.requestAnimationFrame(() => setCreateStep('amount'))
-        return
-      }
-
-      window.requestAnimationFrame(() => setCreateStep('recette'))
-      return
-    }
-
-    if (createStep === 'recette' && compatQuery.data.comptesCompatiblesRecette === null) {
-      if (createRecette !== technicalFallbackId) {
-        createForm.setValue('identifiantCompteRecette', technicalFallbackId)
-      }
+    if (createPrimaryRole === 'depense' && compatQuery.data.comptesCompatiblesRecette === null) {
+      createForm.setValue('identifiantCompteRecette', technicalFallbackId)
       window.requestAnimationFrame(() => setCreateStep('amount'))
     }
-  }, [compatQuery.data, createDepense, createForm, createRecette, createStep, createType, technicalFallbackId])
+
+    if (createPrimaryRole === 'recette' && compatQuery.data.comptesCompatiblesDepense === null) {
+      createForm.setValue('identifiantCompteDepense', technicalFallbackId)
+      window.requestAnimationFrame(() => setCreateStep('amount'))
+    }
+  }, [compatQuery.data, createForm, createPrimaryRole, createStep, createType, technicalFallbackId])
 
   useEffect(() => {
     if (!createType || !compatQuery.data || !technicalFallbackId || !quickEditTarget) {
@@ -774,19 +1094,23 @@ export function OperationsPage() {
 
     const frame = window.requestAnimationFrame(() => {
       createForm.reset(CREATE_DEFAULTS)
-      setCreateStep('type')
-      setCreateOptionsOpen(false)
+      setCreateStep('account-type')
+      setCreatePrimaryAccountType('')
+      setCreatePrimaryAccountId('')
+      setCreatePrimaryRole('')
       setExpandedCreateLineIndex(null)
       setCreateLineCreateOpen(false)
       setCreateLineBaselines([])
       setQuickEditTarget(null)
-      setTypeSearch('')
+      setAccountSearch('')
+      setCounterpartySearch('')
       setDepenseSearch('')
       setRecetteSearch('')
-      setTypeFilterSearch('')
       setOpenCategoryNames([])
       setSubCategoryPickerTarget(null)
       setSubCategorySearch('')
+      setBeneficiaryPickerTarget(null)
+      setBeneficiaryPickerSearch('')
       newCreateLineForm.reset(makeOperationLineValues(todayIso()))
       setCreateOpen(true)
       navigate(location.pathname, { replace: true, state: null })
@@ -822,22 +1146,7 @@ export function OperationsPage() {
   }, [quickEditTarget])
 
   useEffect(() => {
-    if (!createOpen || createStep !== 'review' || !createOptionsOpen) {
-      return
-    }
-
-    const frame = window.requestAnimationFrame(() => {
-      createOptionsPanelRef.current?.scrollIntoView({
-        behavior: 'smooth',
-        block: 'center',
-      })
-    })
-
-    return () => window.cancelAnimationFrame(frame)
-  }, [createOpen, createOptionsOpen, createStep])
-
-  useEffect(() => {
-    if (!createOpen || !createOptionsOpen || expandedCreateLineIndex == null) {
+    if (!createOpen || createStep !== 'review' || expandedCreateLineIndex == null) {
       return
     }
 
@@ -849,7 +1158,7 @@ export function OperationsPage() {
     })
 
     return () => window.cancelAnimationFrame(frame)
-  }, [createOpen, createOptionsOpen, expandedCreateLineIndex])
+  }, [createOpen, createStep, expandedCreateLineIndex])
 
   useEffect(() => {
     if (expandedLineIndex == null) {
@@ -872,19 +1181,178 @@ export function OperationsPage() {
     [compatQuery.data?.comptesCompatiblesRecette, refinedRecetteQuery.data?.comptesCompatiblesRecette],
   )
 
-  const filteredOperations = useMemo(() => operationsQuery.data?.operations ?? [], [operationsQuery.data?.operations])
-  const operationTotalCount = operationsQuery.data?.totalOperations ?? 0
-  const operationTotalPages = operationsQuery.data?.totalPages ?? 0
-  const operationCurrentPage = operationsQuery.data?.numeroPage ?? operationPageIndex
-  const operationFirstVisible = operationsQuery.data?.premierElement ?? 0
-  const operationLastVisible = operationsQuery.data?.dernierElement ?? 0
+  const allAccounts = useMemo(
+    () => [
+      ...(internalAccountsQuery.data ?? []),
+      ...(externalAccountsQuery.data ?? []),
+      ...(technicalAccountsQuery.data ?? []),
+    ],
+    [externalAccountsQuery.data, internalAccountsQuery.data, technicalAccountsQuery.data],
+  )
+
+  const internalAccountIds = useMemo(() => new Set((internalAccountsQuery.data ?? []).map((account) => account.identifiant)), [internalAccountsQuery.data])
+  const externalAccountIds = useMemo(() => new Set((externalAccountsQuery.data ?? []).map((account) => account.identifiant)), [externalAccountsQuery.data])
+  const technicalAccountIds = useMemo(() => new Set((technicalAccountsQuery.data ?? []).map((account) => account.identifiant)), [technicalAccountsQuery.data])
+  const filteredAccountChoicesForFilter = useMemo(() => {
+    const typeFilteredAccounts = selectedAccountTypeFilters.length
+      ? allAccounts.filter((account) =>
+          selectedAccountTypeFilters.includes(accountTypeChoiceForAccount(account, internalAccountIds, externalAccountIds, technicalAccountIds) as AccountTypeChoice),
+        )
+      : allAccounts
+
+    return typeFilteredAccounts.filter((account) => matchesNeedle(accountChoiceLabel(account), deferredAccountFilterSearch))
+  }, [allAccounts, deferredAccountFilterSearch, externalAccountIds, internalAccountIds, selectedAccountTypeFilters, technicalAccountIds])
+  const operationAccountFilterIds = useMemo(() => {
+    const typeAccounts = selectedAccountTypeFilters.length
+      ? allAccounts.filter((account) =>
+          selectedAccountTypeFilters.includes(accountTypeChoiceForAccount(account, internalAccountIds, externalAccountIds, technicalAccountIds) as AccountTypeChoice),
+        )
+      : allAccounts
+    const typeAccountIds = new Set(typeAccounts.map((account) => account.identifiant))
+    const selectedIds = selectedAccountFilters.length ? selectedAccountFilters.filter((identifiant) => typeAccountIds.has(identifiant)) : Array.from(typeAccountIds)
+
+    if (!selectedAccountTypeFilters.length && !selectedAccountFilters.length) {
+      return []
+    }
+
+    return selectedIds
+  }, [allAccounts, externalAccountIds, internalAccountIds, selectedAccountFilters, selectedAccountTypeFilters, technicalAccountIds])
+  const operationAmountFilterPayload = useMemo(
+    () =>
+      activeRangeFilters(amountFilters)
+        .map((filter) => ({
+          montantEnCentimesPlancher: wholeEuroToCents(filter.from || filter.to),
+          montantEnCentimesPlafond: filter.to ? wholeEuroToCents(filter.to, true) : filter.from ? wholeEuroToCents(filter.from, true) : null,
+        }))
+        .filter((filter) => filter.montantEnCentimesPlancher != null || filter.montantEnCentimesPlafond != null),
+    [amountFilters],
+  )
+  const operationDateFilterPayload = useMemo(() => activeRangeFilters(dateFilters), [dateFilters])
+  const accountById = useMemo(() => new Map(allAccounts.map((account) => [account.identifiant, account])), [allAccounts])
+  const operationUsesClientAccountingDateOrdering = true
+  const operationHasAdvancedFilters =
+    operationUsesClientAccountingDateOrdering ||
+    Boolean(selectedAccountTypeFilters.length) ||
+    Boolean(selectedAccountFilters.length) ||
+    Boolean(selectedBeneficiaryFilters.length) ||
+    Boolean(activeRangeFilters(dateFilters).length) ||
+    Boolean(operationAmountFilterPayload.length)
+  const operationNeedsAccountFilterSources = Boolean(selectedAccountTypeFilters.length) || Boolean(selectedAccountFilters.length)
+  const operationFilterSourcesReady =
+    !operationNeedsAccountFilterSources || (!internalAccountsQuery.isLoading && !externalAccountsQuery.isLoading && !technicalAccountsQuery.isLoading)
+  const operationFilterRequest = useMemo<OperationPageRequest>(
+    () => ({
+      ...operationPageSearchPayload(deferredSearch),
+      codesTypeOperation: selectedTypeFilters.length ? selectedTypeFilters : null,
+      identifiantCompte1: operationAccountFilterIds.length === 1 ? operationAccountFilterIds[0] : null,
+      nomsBeneficiaires: selectedBeneficiaryFilters.length ? selectedBeneficiaryFilters : null,
+      dateValeurDepuisLe: operationDateFilterPayload.length === 1 ? operationDateFilterPayload[0].from || operationDateFilterPayload[0].to || null : null,
+      dateValeurJusqueAu: operationDateFilterPayload.length === 1 ? operationDateFilterPayload[0].to || operationDateFilterPayload[0].from || null : null,
+      montantEnCentimesPlancher: operationAmountFilterPayload.length === 1 ? operationAmountFilterPayload[0].montantEnCentimesPlancher : null,
+      montantEnCentimesPlafond: operationAmountFilterPayload.length === 1 ? operationAmountFilterPayload[0].montantEnCentimesPlafond : null,
+    }),
+    [
+      deferredSearch,
+      operationAccountFilterIds,
+      operationAmountFilterPayload,
+      operationDateFilterPayload,
+      selectedBeneficiaryFilters,
+      selectedTypeFilters,
+    ],
+  )
+  const operationPageRequest = useMemo<OperationPageRequest>(
+    () => ({
+      numeroPage: operationPageIndex,
+      taillePage: operationPageSize,
+      ...operationFilterRequest,
+    }),
+    [operationFilterRequest, operationPageIndex, operationPageSize],
+  )
+  const operationsQuery = useQuery({
+    queryKey: ['operations', 'page', operationPageRequest],
+    queryFn: () => monatisApi.listOperationsPage(operationPageRequest),
+    enabled: !operationHasAdvancedFilters,
+  })
+  const advancedOperationsQuery = useQuery({
+    queryKey: ['operations', 'advanced-page', operationFilterRequest],
+    queryFn: () => fetchAllOperationPages(operationFilterRequest),
+    enabled: operationHasAdvancedFilters && operationFilterSourcesReady,
+  })
+
+  const advancedFilteredOperations = useMemo(() => {
+    if (!operationHasAdvancedFilters) {
+      return []
+    }
+
+    return (advancedOperationsQuery.data ?? []).filter((operation) => {
+      const operationAccounts = [depenseId(operation), recetteId(operation)]
+
+      if (selectedTypeFilters.length && !selectedTypeFilters.includes(operationTypeCode(operation))) {
+        return false
+      }
+
+      if (operationAccountFilterIds.length && !operationAccounts.some((identifiant) => operationAccountFilterIds.includes(identifiant))) {
+        return false
+      }
+
+      if ((selectedAccountTypeFilters.length || selectedAccountFilters.length) && !operationAccountFilterIds.length) {
+        return false
+      }
+
+      if (
+        selectedBeneficiaryFilters.length &&
+        !operation.lignes.some((line) => beneficiaryNamesForDisplay(line).some((nom) => selectedBeneficiaryFilters.includes(nom)))
+      ) {
+        return false
+      }
+
+      return operationMatchesSearch(operation, deferredSearch, accountById) && operationMatchesDates(operation, dateFilters) && operationMatchesAmounts(operation, amountFilters)
+    }).sort(compareOperationsByAccountingDate)
+  }, [
+    accountById,
+    advancedOperationsQuery.data,
+    amountFilters,
+    dateFilters,
+    deferredSearch,
+    operationAccountFilterIds,
+    operationHasAdvancedFilters,
+    selectedAccountFilters.length,
+    selectedAccountTypeFilters.length,
+    selectedBeneficiaryFilters,
+    selectedTypeFilters,
+  ])
+  const advancedOperationTotalCount = advancedFilteredOperations.length
+  const advancedOperationTotalPages = advancedOperationTotalCount ? Math.ceil(advancedOperationTotalCount / operationPageSize) : 0
+  const advancedOperationCurrentPage = Math.max(1, Math.min(operationPageIndex, Math.max(advancedOperationTotalPages, 1)))
+  const advancedOperationFirstVisible = advancedOperationTotalCount ? (advancedOperationCurrentPage - 1) * operationPageSize + 1 : 0
+  const advancedOperationLastVisible = advancedOperationTotalCount ? Math.min(advancedOperationCurrentPage * operationPageSize, advancedOperationTotalCount) : 0
+  const filteredOperations = useMemo(
+    () =>
+      operationHasAdvancedFilters
+        ? advancedFilteredOperations.slice(advancedOperationFirstVisible ? advancedOperationFirstVisible - 1 : 0, advancedOperationLastVisible)
+        : [...(operationsQuery.data?.operations ?? [])].sort(compareOperationsByAccountingDate),
+    [advancedFilteredOperations, advancedOperationFirstVisible, advancedOperationLastVisible, operationHasAdvancedFilters, operationsQuery.data?.operations],
+  )
+  const operationTotalCount = operationHasAdvancedFilters ? advancedOperationTotalCount : operationsQuery.data?.totalOperations ?? 0
+  const operationTotalPages = operationHasAdvancedFilters ? advancedOperationTotalPages : operationsQuery.data?.totalPages ?? 0
+  const operationCurrentPage = operationHasAdvancedFilters ? advancedOperationCurrentPage : operationsQuery.data?.numeroPage ?? operationPageIndex
+  const operationFirstVisible = operationHasAdvancedFilters ? advancedOperationFirstVisible : operationsQuery.data?.premierElement ?? 0
+  const operationLastVisible = operationHasAdvancedFilters ? advancedOperationLastVisible : operationsQuery.data?.dernierElement ?? 0
+  const operationListLoading = operationHasAdvancedFilters ? !operationFilterSourcesReady || advancedOperationsQuery.isLoading : operationsQuery.isLoading
+  const operationListError = operationHasAdvancedFilters ? advancedOperationsQuery.error : operationsQuery.error
   const operationPageLabel = operationTotalCount ? `${operationCurrentPage}/${Math.max(operationTotalPages, 1)}` : '0/0'
 
   const selectedOperationSummary = useMemo(
     () => filteredOperations.find((operation) => operation.numero === selectedNumero) ?? null,
     [filteredOperations, selectedNumero],
   )
+  const selectedOperationIndex = useMemo(
+    () => (selectedNumero ? filteredOperations.findIndex((operation) => operation.numero === selectedNumero) : -1),
+    [filteredOperations, selectedNumero],
+  )
+  const selectedOperationPosition = selectedOperationIndex >= 0 ? selectedOperationIndex + 1 : 0
   const selectedOperationForDisplay = selectedOperationSummary ?? detailQuery.data ?? null
+  const selectedOperationTitle = selectedOperationForDisplay ? operationDetailTitle(selectedOperationForDisplay) : 'Operation'
   const createDefinedAmountCents = parseMoneyToCents(createAmount || '0')
   const createPrimaryLineIndex = useMemo(() => primaryLineIndex(createLines), [createLines])
   const createPrimaryRemainingCents = useMemo(
@@ -903,6 +1371,10 @@ export function OperationsPage() {
   const currentLineBudgetCents =
     (editAmount.trim() ? parseMoneyToCents(editAmount) : null) ?? lineBudgetCents ?? selectedOperationSummary?.montantEnCentimes ?? detailQuery.data?.montantEnCentimes ?? 0
   const detailPrimaryLineIndex = useMemo(() => primaryLineIndex(watchedLines), [watchedLines])
+  const detailAccountingDate = useMemo(() => {
+    const watchedPrimaryDate = detailPrimaryLineIndex === -1 ? '' : watchedLines[detailPrimaryLineIndex]?.dateComptabilisation ?? ''
+    return watchedPrimaryDate || (detailQuery.data ? operationAccountingDate(detailQuery.data) : '')
+  }, [detailPrimaryLineIndex, detailQuery.data, watchedLines])
   const detailPrimaryRemainingCents = useMemo(
     () => remainingAmountForPrimaryLine(currentLineBudgetCents, watchedLines, detailPrimaryLineIndex),
     [currentLineBudgetCents, detailPrimaryLineIndex, watchedLines],
@@ -950,29 +1422,12 @@ export function OperationsPage() {
       return
     }
 
-    const nextBeneficiaries = [...createBeneficiaries].sort((left, right) => left.localeCompare(right))
     const currentPrimaryLine = createLines[createPrimaryLineIndex]
-    const currentBeneficiaries = [...(currentPrimaryLine?.nomsBeneficiaires ?? [])].sort((left, right) => left.localeCompare(right))
-
-    if ((currentPrimaryLine?.libelle ?? '') !== createLibelle) {
-      createForm.setValue(`lignes.${createPrimaryLineIndex}.libelle`, createLibelle, { shouldDirty: false })
-    }
 
     if ((currentPrimaryLine?.dateComptabilisation ?? '') !== createDateValeur) {
       createForm.setValue(`lignes.${createPrimaryLineIndex}.dateComptabilisation`, createDateValeur, { shouldDirty: false })
     }
-
-    if ((currentPrimaryLine?.nomSousCategorie ?? '') !== createNomSousCategorie) {
-      createForm.setValue(`lignes.${createPrimaryLineIndex}.nomSousCategorie`, createNomSousCategorie, { shouldDirty: false })
-    }
-
-    if (
-      currentBeneficiaries.length !== nextBeneficiaries.length ||
-      currentBeneficiaries.some((value, index) => value !== nextBeneficiaries[index])
-    ) {
-      createForm.setValue(`lignes.${createPrimaryLineIndex}.nomsBeneficiaires`, nextBeneficiaries, { shouldDirty: false })
-    }
-  }, [createBeneficiaries, createDateValeur, createForm, createLibelle, createLines, createNomSousCategorie, createPrimaryLineIndex])
+  }, [createDateValeur, createForm, createLines, createPrimaryLineIndex])
 
   useEffect(() => {
     if (detailPrimaryLineIndex === -1) {
@@ -984,18 +1439,6 @@ export function OperationsPage() {
       editForm.setValue(`lignes.${detailPrimaryLineIndex}.montant`, toMoneyInput(detailPrimaryRemainingCents), { shouldDirty: false })
     }
   }, [detailPrimaryLineIndex, detailPrimaryRemainingCents, editForm, watchedLines])
-
-  const allAccounts = useMemo(
-    () => [
-      ...(internalAccountsQuery.data ?? []),
-      ...(externalAccountsQuery.data ?? []),
-      ...(technicalAccountsQuery.data ?? []),
-    ],
-    [externalAccountsQuery.data, internalAccountsQuery.data, technicalAccountsQuery.data],
-  )
-
-  const internalAccountIds = useMemo(() => new Set((internalAccountsQuery.data ?? []).map((account) => account.identifiant)), [internalAccountsQuery.data])
-  const externalAccountIds = useMemo(() => new Set((externalAccountsQuery.data ?? []).map((account) => account.identifiant)), [externalAccountsQuery.data])
 
   const sortedOperationTypes = useMemo(
     () =>
@@ -1015,38 +1458,58 @@ export function OperationsPage() {
     [typesQuery.data],
   )
 
-  const filteredOperationTypes = useMemo(
-    () =>
-      sortedOperationTypes.filter((type) =>
-        matchesNeedle(`${type.code} ${type.libelleCourt} ${type.libelle}`, deferredTypeSearch),
-      ),
-    [deferredTypeSearch, sortedOperationTypes],
+  const selectableOperationTypes = useMemo(
+    () => sortedOperationTypes.filter((type) => !HIDDEN_CREATE_OPERATION_TYPES.has(type.code)),
+    [sortedOperationTypes],
   )
 
   const groupedOperationTypes = useMemo(
     () =>
       OPERATION_TYPE_GROUP_META.map((group) => ({
         ...group,
-        items: filteredOperationTypes.filter((type) => operationTypeGroup(type.code) === group.key),
+        items: selectableOperationTypes.filter((type) => operationTypeGroup(type.code) === group.key),
       })).filter((group) => group.items.length),
-    [filteredOperationTypes],
+    [selectableOperationTypes],
   )
 
-  const filteredFilterOperationTypes = useMemo(
+  const accountTypeChoices = useMemo(
     () =>
-      sortedOperationTypes.filter((type) =>
-        matchesNeedle(`${type.code} ${type.libelleCourt} ${type.libelle}`, deferredTypeFilterSearch),
-      ),
-    [deferredTypeFilterSearch, sortedOperationTypes],
+      ACCOUNT_TYPE_META.map((item) => ({
+        ...item,
+        count: accountsForTypeChoice(item.key, internalAccountsQuery.data ?? [], externalAccountsQuery.data ?? [], technicalAccountsQuery.data ?? []).length,
+      })),
+    [externalAccountsQuery.data, internalAccountsQuery.data, technicalAccountsQuery.data],
+  )
+
+  const createPrimaryAccountOptions = useMemo(
+    () =>
+      createPrimaryAccountType
+        ? accountsForTypeChoice(createPrimaryAccountType, internalAccountsQuery.data ?? [], externalAccountsQuery.data ?? [], technicalAccountsQuery.data ?? [])
+        : [],
+    [createPrimaryAccountType, externalAccountsQuery.data, internalAccountsQuery.data, technicalAccountsQuery.data],
+  )
+
+  const filteredCreatePrimaryAccountOptions = useMemo(
+    () => createPrimaryAccountOptions.filter((account) => matchesNeedle(accountChoiceLabel(account), deferredAccountSearch)),
+    [createPrimaryAccountOptions, deferredAccountSearch],
+  )
+
+  const filteredBeneficiaryFilterOptions = useMemo(
+    () => (beneficiairesQuery.data ?? []).filter((beneficiaire) => matchesNeedle(`${beneficiaire.nom} ${beneficiaire.libelle ?? ''}`, deferredBeneficiaryFilterSearch)),
+    [beneficiairesQuery.data, deferredBeneficiaryFilterSearch],
+  )
+  const filteredBeneficiaryPickerOptions = useMemo(
+    () => (beneficiairesQuery.data ?? []).filter((beneficiaire) => matchesNeedle(`${beneficiaire.nom} ${beneficiaire.libelle ?? ''}`, deferredBeneficiaryPickerSearch)),
+    [beneficiairesQuery.data, deferredBeneficiaryPickerSearch],
   )
 
   const groupedFilterOperationTypes = useMemo(
     () =>
       OPERATION_TYPE_GROUP_META.map((group) => ({
         ...group,
-        items: filteredFilterOperationTypes.filter((type) => operationTypeGroup(type.code) === group.key),
+        items: sortedOperationTypes.filter((type) => operationTypeGroup(type.code) === group.key),
       })).filter((group) => group.items.length),
-    [filteredFilterOperationTypes],
+    [sortedOperationTypes],
   )
 
   const filteredDepenseOptions = useMemo(
@@ -1059,6 +1522,53 @@ export function OperationsPage() {
     [deferredRecetteSearch, recetteOptions],
   )
 
+  const createCompatibleTypeChoices = useMemo(() => {
+    const depenseCodes = new Set((createPrimaryCompatQuery.data?.typesOperationsCompatiblesDepense ?? []).map((type) => type.code))
+    const recetteCodes = new Set((createPrimaryCompatQuery.data?.typesOperationsCompatiblesRecette ?? []).map((type) => type.code))
+
+    return selectableOperationTypes.flatMap((type) => {
+      const choices: Array<{ key: string; type: TypeOperation; role: AccountField }> = []
+
+      if (depenseCodes.has(type.code)) {
+        choices.push({ key: `${type.code}-depense`, type, role: 'depense' })
+      }
+
+      if (recetteCodes.has(type.code)) {
+        choices.push({ key: `${type.code}-recette`, type, role: 'recette' })
+      }
+
+      return choices
+    })
+  }, [createPrimaryCompatQuery.data, selectableOperationTypes])
+  const groupedCreateCompatibleTypes = useMemo(
+    () =>
+      OPERATION_TYPE_GROUP_META.map((group) => ({
+        ...group,
+        items: createCompatibleTypeChoices.filter((choice) => operationTypeGroup(choice.type.code) === group.key),
+      })).filter((group) => group.items.length),
+    [createCompatibleTypeChoices],
+  )
+  const createCounterpartyRole: AccountField = createPrimaryRole === 'recette' ? 'depense' : 'recette'
+  const counterpartyOptions = useMemo(() => {
+    if (!createType || !createPrimaryRole) {
+      return []
+    }
+
+    if (createPrimaryRole === 'depense') {
+      return refinedRecetteQuery.data?.comptesCompatiblesRecette ?? compatQuery.data?.comptesCompatiblesRecette ?? []
+    }
+
+    return refinedDepenseQuery.data?.comptesCompatiblesDepense ?? compatQuery.data?.comptesCompatiblesDepense ?? []
+  }, [compatQuery.data?.comptesCompatiblesDepense, compatQuery.data?.comptesCompatiblesRecette, createPrimaryRole, createType, refinedDepenseQuery.data?.comptesCompatiblesDepense, refinedRecetteQuery.data?.comptesCompatiblesRecette])
+  const filteredCounterpartyOptions = useMemo(
+    () => counterpartyOptions.filter((account) => matchesNeedle(accountChoiceLabel(account), deferredCounterpartySearch)),
+    [counterpartyOptions, deferredCounterpartySearch],
+  )
+  const counterpartyTypeChoices = useMemo(
+    () => accountTypeChoicesFromOptions(counterpartyOptions, internalAccountIds, externalAccountIds, technicalAccountIds),
+    [counterpartyOptions, externalAccountIds, internalAccountIds, technicalAccountIds],
+  )
+
   const selectedType = useMemo(
     () => (typesQuery.data ?? []).find((type) => type.code === createType) ?? null,
     [createType, typesQuery.data],
@@ -1067,27 +1577,69 @@ export function OperationsPage() {
     () => sortedOperationTypes.filter((type) => selectedTypeFilters.includes(type.code)),
     [selectedTypeFilters, sortedOperationTypes],
   )
+  const selectedAccountFilterItems = useMemo(
+    () => allAccounts.filter((account) => selectedAccountFilters.includes(account.identifiant)),
+    [allAccounts, selectedAccountFilters],
+  )
+  const activeDateFilters = useMemo(() => activeRangeFilters(dateFilters), [dateFilters])
+  const activeAmountFilters = useMemo(() => activeRangeFilters(amountFilters), [amountFilters])
   const createFlowLabels = useMemo(() => flowLabelsForType(createType), [createType])
   const createDepenseKinds = useMemo(
-    () => operationAccountKinds(createType, 'depense', depenseOptions, internalAccountIds, externalAccountIds),
-    [createType, depenseOptions, externalAccountIds, internalAccountIds],
+    () => operationAccountKinds(createType, 'depense', depenseOptions, internalAccountIds, externalAccountIds, technicalAccountIds),
+    [createType, depenseOptions, externalAccountIds, internalAccountIds, technicalAccountIds],
   )
   const createRecetteKinds = useMemo(
-    () => operationAccountKinds(createType, 'recette', recetteOptions, internalAccountIds, externalAccountIds),
-    [createType, externalAccountIds, internalAccountIds, recetteOptions],
+    () => operationAccountKinds(createType, 'recette', recetteOptions, internalAccountIds, externalAccountIds, technicalAccountIds),
+    [createType, externalAccountIds, internalAccountIds, recetteOptions, technicalAccountIds],
   )
+  const counterpartyKinds = useMemo(() => {
+    const kinds = counterpartyTypeChoices.map((choice) => accountKindForTypeChoice(choice))
+    return Array.from(new Set(kinds))
+  }, [counterpartyTypeChoices])
+  const counterpartySingleType = counterpartyTypeChoices.length === 1 ? counterpartyTypeChoices[0] : ''
+  const counterpartyIsLoading = createPrimaryRole === 'depense' ? refinedRecetteQuery.isLoading : refinedDepenseQuery.isLoading
   const editFlowLabels = useMemo(
     () => flowLabelsForType(editType || detailQuery.data?.typeOperation?.code || detailQuery.data?.codeTypeOperation || ''),
     [detailQuery.data?.codeTypeOperation, detailQuery.data?.typeOperation?.code, editType],
   )
   const detailOperationCode = editType || detailQuery.data?.typeOperation?.code || detailQuery.data?.codeTypeOperation || ''
+  const editDepenseOptions = useMemo(
+    () =>
+      accountOptionsWithCurrent(
+        compatibleAccountOptionsForField(
+          detailOperationCode,
+          'depense',
+          internalAccountsQuery.data ?? [],
+          externalAccountsQuery.data ?? [],
+          technicalAccountsQuery.data ?? [],
+        ),
+        editDepense || (detailQuery.data ? depenseId(detailQuery.data) : ''),
+        allAccounts,
+      ),
+    [allAccounts, detailOperationCode, detailQuery.data, editDepense, externalAccountsQuery.data, internalAccountsQuery.data, technicalAccountsQuery.data],
+  )
+  const editRecetteOptions = useMemo(
+    () =>
+      accountOptionsWithCurrent(
+        compatibleAccountOptionsForField(
+          detailOperationCode,
+          'recette',
+          internalAccountsQuery.data ?? [],
+          externalAccountsQuery.data ?? [],
+          technicalAccountsQuery.data ?? [],
+        ),
+        editRecette || (detailQuery.data ? recetteId(detailQuery.data) : ''),
+        allAccounts,
+      ),
+    [allAccounts, detailOperationCode, detailQuery.data, editRecette, externalAccountsQuery.data, internalAccountsQuery.data, technicalAccountsQuery.data],
+  )
   const editDepenseKinds = useMemo(
-    () => operationAccountKinds(detailOperationCode, 'depense', allAccounts, internalAccountIds, externalAccountIds),
-    [allAccounts, detailOperationCode, externalAccountIds, internalAccountIds],
+    () => operationAccountKinds(detailOperationCode, 'depense', editDepenseOptions, internalAccountIds, externalAccountIds, technicalAccountIds),
+    [detailOperationCode, editDepenseOptions, externalAccountIds, internalAccountIds, technicalAccountIds],
   )
   const editRecetteKinds = useMemo(
-    () => operationAccountKinds(detailOperationCode, 'recette', allAccounts, internalAccountIds, externalAccountIds),
-    [allAccounts, detailOperationCode, externalAccountIds, internalAccountIds],
+    () => operationAccountKinds(detailOperationCode, 'recette', editRecetteOptions, internalAccountIds, externalAccountIds, technicalAccountIds),
+    [detailOperationCode, editRecetteOptions, externalAccountIds, internalAccountIds, technicalAccountIds],
   )
   const detailReferenceSummary = useMemo(() => {
     if (!detailQuery.data && !watchedLines.length) {
@@ -1144,7 +1696,7 @@ export function OperationsPage() {
   const createMutation = useMutation({
     mutationFn: ({ values }: CreateOperationInput) => {
       return monatisApi.createOperation({
-        numero: nullIfBlank(values.numero ?? ''),
+        numero: null,
         libelle: nullIfBlank(values.libelle ?? ''),
         codeTypeOperation: values.codeTypeOperation,
         dateValeur: nullIfBlank(values.dateValeur ?? ''),
@@ -1200,7 +1752,7 @@ export function OperationsPage() {
       const lignes = buildOperationLinePayloads(values.lignes ?? [])
 
       return monatisApi.updateOperation(selectedNumero!, {
-        numero: nullIfBlank(values.numero ?? ''),
+        numero: null,
         libelle: nullIfBlank(values.libelle ?? ''),
         codeTypeOperation: nullIfBlank(values.codeTypeOperation ?? ''),
         dateValeur: nullIfBlank(values.dateValeur ?? ''),
@@ -1239,12 +1791,13 @@ export function OperationsPage() {
       })
       setDetailLineBaselines([])
       queryClient.removeQueries({ queryKey: ['operations', deletedNumero] })
+      closeBeneficiaryPicker()
       await queryClient.invalidateQueries({ queryKey: ['operations'] })
     },
   })
 
   const hasError =
-    operationsQuery.error ||
+    operationListError ||
     detailQuery.error ||
     typesQuery.error ||
     internalAccountsQuery.error ||
@@ -1254,6 +1807,8 @@ export function OperationsPage() {
     sousCategoriesQuery.error ||
     beneficiairesQuery.error ||
     compatQuery.error ||
+    createPrimaryCompatQuery.error ||
+    refinedDepenseQuery.error ||
     refinedRecetteQuery.error ||
     createMutation.error ||
     updateMutation.error ||
@@ -1262,6 +1817,7 @@ export function OperationsPage() {
   const currentTypeNeedsReference = ['RECETTE', 'DEPENSE', 'ACHAT', 'VENTE'].includes(createType)
   const depenseIsTechnical = compatQuery.data?.comptesCompatiblesDepense === null
   const recetteIsTechnical = compatQuery.data?.comptesCompatiblesRecette === null
+  const counterpartyIsTechnical = createCounterpartyRole === 'depense' ? depenseIsTechnical : recetteIsTechnical
   const depenseReady = depenseIsTechnical ? Boolean(technicalFallbackId) : Boolean(createDepense)
   const recetteReady = recetteIsTechnical ? Boolean(technicalFallbackId) : Boolean(createRecette)
   const createReady = Boolean(createType) && amountReady && depenseReady && recetteReady
@@ -1269,19 +1825,23 @@ export function OperationsPage() {
 
   function resetCreateFlow() {
     createForm.reset(CREATE_DEFAULTS)
-    setCreateStep('type')
-    setCreateOptionsOpen(false)
+    setCreateStep('account-type')
+    setCreatePrimaryAccountType('')
+    setCreatePrimaryAccountId('')
+    setCreatePrimaryRole('')
     setExpandedCreateLineIndex(null)
     setCreateLineCreateOpen(false)
     setCreateLineBaselines([])
     setQuickEditTarget(null)
-    setTypeSearch('')
+    setAccountSearch('')
+    setCounterpartySearch('')
     setDepenseSearch('')
     setRecetteSearch('')
-    setTypeFilterSearch('')
     setOpenCategoryNames([])
     setSubCategoryPickerTarget(null)
     setSubCategorySearch('')
+    setBeneficiaryPickerTarget(null)
+    setBeneficiaryPickerSearch('')
     newCreateLineForm.reset(makeOperationLineValues(todayIso()))
   }
 
@@ -1299,11 +1859,14 @@ export function OperationsPage() {
       nomSousCategorie: keepReferences ? values.nomSousCategorie ?? '' : '',
       nomsBeneficiaires: keepReferences ? values.nomsBeneficiaires ?? [] : [],
       montant: '',
-      numero: '',
       lignes: [],
     })
+    if (createPrimaryRole === 'depense') {
+      setCreatePrimaryAccountId(values.identifiantCompteDepense ?? '')
+    } else if (createPrimaryRole === 'recette') {
+      setCreatePrimaryAccountId(values.identifiantCompteRecette ?? '')
+    }
     setCreateStep('amount')
-    setCreateOptionsOpen(false)
     setExpandedCreateLineIndex(null)
     setCreateLineCreateOpen(false)
     setCreateLineBaselines([])
@@ -1312,6 +1875,8 @@ export function OperationsPage() {
     setRecetteSearch('')
     setSubCategoryPickerTarget(null)
     setSubCategorySearch('')
+    setBeneficiaryPickerTarget(null)
+    setBeneficiaryPickerSearch('')
     newCreateLineForm.reset(makeOperationLineValues(nextDate))
   }
 
@@ -1331,42 +1896,49 @@ export function OperationsPage() {
     setCreateOpen(false)
   }
 
-  function toggleCreateOptionsPanel() {
-    if (createOptionsOpen) {
-      if (expandedCreateLineIndex != null && createLineIsDirty(expandedCreateLineIndex)) {
-        resetCreateLineToBaseline(expandedCreateLineIndex)
-      }
-      setExpandedCreateLineIndex(null)
-      setCreateLineCreateOpen(false)
-      newCreateLineForm.reset(makeOperationLineValues(createForm.getValues('dateValeur') || todayIso()))
-      if (subCategoryPickerTarget?.kind === 'createLine' || subCategoryPickerTarget?.kind === 'newCreateLine') {
-        closeSubCategoryPicker()
-      }
-    }
-
-    setCreateOptionsOpen((current) => !current)
+  function selectPrimaryAccountType(choice: AccountTypeChoice) {
+    setCreatePrimaryAccountType(choice)
+    setCreatePrimaryAccountId('')
+    setCreatePrimaryRole('')
+    setAccountSearch('')
+    createForm.setValue('codeTypeOperation', '')
+    createForm.setValue('identifiantCompteDepense', '')
+    createForm.setValue('identifiantCompteRecette', '')
+    setCreateStep('account')
   }
 
-  function selectType(code: string) {
+  function selectPrimaryAccount(identifiant: string) {
+    setCreatePrimaryAccountId(identifiant)
+    setCreatePrimaryRole('')
+    createForm.setValue('codeTypeOperation', '')
+    createForm.setValue('identifiantCompteDepense', '')
+    createForm.setValue('identifiantCompteRecette', '')
+    setCounterpartySearch('')
+    setCreateStep('type')
+  }
+
+  function selectType(code: string, primaryRole: AccountField) {
     const keepReferences = ['RECETTE', 'DEPENSE', 'ACHAT', 'VENTE'].includes(code)
     createForm.reset({
       ...CREATE_DEFAULTS,
       dateValeur: createDateValeur || todayIso(),
-      numero: createNumero,
       libelle: createLibelle,
       montant: createAmount,
       nomSousCategorie: keepReferences ? createNomSousCategorie : '',
       nomsBeneficiaires: keepReferences ? createBeneficiaries : [],
       codeTypeOperation: code,
+      identifiantCompteDepense: primaryRole === 'depense' ? createPrimaryAccountId : '',
+      identifiantCompteRecette: primaryRole === 'recette' ? createPrimaryAccountId : '',
       lignes: [],
     })
-    setCreateOptionsOpen(false)
+    setCreatePrimaryRole(primaryRole)
     setExpandedCreateLineIndex(null)
     setCreateLineCreateOpen(false)
     setCreateLineBaselines([])
     setDepenseSearch('')
     setRecetteSearch('')
-    setCreateStep('depense')
+    setCounterpartySearch('')
+    setCreateStep('counterparty')
   }
 
   function selectTypeInQuickEditor(code: string) {
@@ -1374,7 +1946,6 @@ export function OperationsPage() {
     createForm.reset({
       ...CREATE_DEFAULTS,
       dateValeur: createDateValeur || todayIso(),
-      numero: createNumero,
       libelle: createLibelle,
       montant: createAmount,
       nomSousCategorie: keepReferences ? createNomSousCategorie : '',
@@ -1382,26 +1953,12 @@ export function OperationsPage() {
       codeTypeOperation: code,
       lignes: [],
     })
-    setCreateOptionsOpen(false)
     setExpandedCreateLineIndex(null)
     setCreateLineCreateOpen(false)
     setCreateLineBaselines([])
     setDepenseSearch('')
     setRecetteSearch('')
     setQuickEditTarget('depense')
-  }
-
-  function selectDepenseAccount(identifiant: string) {
-    createForm.setValue('identifiantCompteDepense', identifiant)
-    if (recetteIsTechnical && technicalFallbackId) {
-      createForm.setValue('identifiantCompteRecette', technicalFallbackId)
-      setCreateStep('amount')
-      return
-    }
-
-    createForm.setValue('identifiantCompteRecette', '')
-    setRecetteSearch('')
-    setCreateStep('recette')
   }
 
   function selectDepenseInQuickEditor(identifiant: string) {
@@ -1417,14 +1974,19 @@ export function OperationsPage() {
     setQuickEditTarget('recette')
   }
 
-  function selectRecetteAccount(identifiant: string) {
-    createForm.setValue('identifiantCompteRecette', identifiant)
-    setCreateStep('amount')
-  }
-
   function selectRecetteInQuickEditor(identifiant: string) {
     createForm.setValue('identifiantCompteRecette', identifiant)
     setQuickEditTarget(amountReady ? null : 'amount')
+  }
+
+  function selectCounterpartyAccount(identifiant: string) {
+    if (createPrimaryRole === 'depense') {
+      createForm.setValue('identifiantCompteRecette', identifiant)
+    } else {
+      createForm.setValue('identifiantCompteDepense', identifiant)
+    }
+
+    setCreateStep('amount')
   }
 
   function continueFromAmount() {
@@ -1435,7 +1997,7 @@ export function OperationsPage() {
     if (!createLines.length) {
       const defaultLine = normalizeOperationLineValues({
         numeroLigne: 0,
-        libelle: createLibelle,
+        libelle: lineDisplayTitle(0, 0),
         dateComptabilisation: createDateValeur || todayIso(),
         montant: createAmount,
         nomSousCategorie: createNomSousCategorie,
@@ -1456,6 +2018,7 @@ export function OperationsPage() {
     setLineBudgetCents(null)
     setDetailLineBaselines([])
     closeSubCategoryPicker()
+    closeBeneficiaryPicker()
   }
 
   function resetCreateLineToBaseline(index: number) {
@@ -1502,7 +2065,7 @@ export function OperationsPage() {
       resetCreateLineToBaseline(expandedCreateLineIndex)
     }
     setExpandedCreateLineIndex(null)
-    newCreateLineForm.reset(makeOperationLineValues(createForm.getValues('dateValeur') || todayIso()))
+    newCreateLineForm.reset(makeOperationLineValues(createForm.getValues('dateValeur') || todayIso(), createLineFieldArray.fields.length))
     setCreateLineCreateOpen(true)
   }
 
@@ -1512,6 +2075,9 @@ export function OperationsPage() {
     newCreateLineForm.reset(makeOperationLineValues(createForm.getValues('dateValeur') || todayIso()))
     if (subCategoryPickerTarget?.kind === 'newCreateLine') {
       closeSubCategoryPicker()
+    }
+    if (beneficiaryPickerTarget?.kind === 'newCreateLine') {
+      closeBeneficiaryPicker()
     }
   }
 
@@ -1559,7 +2125,7 @@ export function OperationsPage() {
       resetLineToBaseline(expandedLineIndex)
     }
     setExpandedLineIndex(null)
-    newLineForm.reset(makeOperationLineValues(editForm.getValues('dateValeur') || todayIso()))
+    newLineForm.reset(makeOperationLineValues(editForm.getValues('dateValeur') || todayIso(), lineFieldArray.fields.length))
     setLineCreateOpen(true)
   }
 
@@ -1570,6 +2136,9 @@ export function OperationsPage() {
     if (subCategoryPickerTarget?.kind === 'newLine') {
       closeSubCategoryPicker()
     }
+    if (beneficiaryPickerTarget?.kind === 'newLine') {
+      closeBeneficiaryPicker()
+    }
   }
 
   function goBack() {
@@ -1579,27 +2148,22 @@ export function OperationsPage() {
     }
 
     if (createStep === 'amount') {
-      if (!recetteIsTechnical) {
-        setCreateStep('recette')
-        return
-      }
+      setCreateStep('counterparty')
+      return
+    }
 
-      if (!depenseIsTechnical) {
-        setCreateStep('depense')
-        return
-      }
-
+    if (createStep === 'counterparty') {
       setCreateStep('type')
       return
     }
 
-    if (createStep === 'depense') {
-      setCreateStep('type')
+    if (createStep === 'type') {
+      setCreateStep('account')
       return
     }
 
-    if (createStep === 'recette') {
-      setCreateStep(depenseIsTechnical ? 'type' : 'depense')
+    if (createStep === 'account') {
+      setCreateStep('account-type')
       return
     }
   }
@@ -1615,17 +2179,22 @@ export function OperationsPage() {
       return
     }
 
-    if (step === 'recette' && depenseReady) {
-      setCreateStep('recette')
+    if (step === 'counterparty' && createType && createPrimaryRole) {
+      setCreateStep('counterparty')
       return
     }
 
-    if (step === 'depense' && createType) {
-      setCreateStep('depense')
+    if (step === 'type' && createPrimaryAccountId) {
+      setCreateStep('type')
       return
     }
 
-    setCreateStep('type')
+    if (step === 'account' && createPrimaryAccountType) {
+      setCreateStep('account')
+      return
+    }
+
+    setCreateStep('account-type')
   }
 
   function toggleCategoryAccordion(name: string) {
@@ -1647,6 +2216,51 @@ export function OperationsPage() {
   function clearTypeFilters() {
     setOperationPageIndex(1)
     setSelectedTypeFilters([])
+  }
+
+  function toggleAccountTypeFilter(choice: AccountTypeChoice) {
+    setOperationPageIndex(1)
+    setSelectedAccountTypeFilters((current) => (current.includes(choice) ? current.filter((value) => value !== choice) : [...current, choice]))
+  }
+
+  function toggleAccountFilter(identifiant: string) {
+    setOperationPageIndex(1)
+    setSelectedAccountFilters((current) => (current.includes(identifiant) ? current.filter((value) => value !== identifiant) : [...current, identifiant]))
+  }
+
+  function toggleBeneficiaryFilter(nom: string) {
+    setOperationPageIndex(1)
+    setSelectedBeneficiaryFilters((current) => (current.includes(nom) ? current.filter((value) => value !== nom) : [...current, nom]))
+  }
+
+  function updateDateFilter(index: number, field: keyof RangeFilterValue, value: string) {
+    setOperationPageIndex(1)
+    setDateFilters((current) => normalizeRangeRows(current.map((item, itemIndex) => (itemIndex === index ? { ...item, [field]: value } : item))))
+  }
+
+  function updateAmountFilter(index: number, field: keyof RangeFilterValue, value: string) {
+    setOperationPageIndex(1)
+    setAmountFilters((current) => normalizeRangeRows(current.map((item, itemIndex) => (itemIndex === index ? { ...item, [field]: value } : item))))
+  }
+
+  function clearDateFilters() {
+    setOperationPageIndex(1)
+    setDateFilters([{ from: '', to: '' }])
+  }
+
+  function clearAmountFilters() {
+    setOperationPageIndex(1)
+    setAmountFilters([{ from: '', to: '' }])
+  }
+
+  function clearOperationFilters() {
+    setOperationPageIndex(1)
+    setSelectedTypeFilters([])
+    setSelectedAccountTypeFilters([])
+    setSelectedAccountFilters([])
+    setSelectedBeneficiaryFilters([])
+    setDateFilters([{ from: '', to: '' }])
+    setAmountFilters([{ from: '', to: '' }])
   }
 
   function changeOperationPageSize(value: string) {
@@ -1704,6 +2318,18 @@ export function OperationsPage() {
     )
   }
 
+  function renderOperationFilterButton(label: string, value: string, picker: Exclude<OperationFilterPicker, null>) {
+    return (
+      <button type="button" className="picker-field picker-field-compact operation-filter-button" onClick={() => setOperationFilterPicker(picker)}>
+        <div className="picker-field-content">
+          <span className="operation-filter-button-label">{label}</span>
+          <strong>{value}</strong>
+        </div>
+        <ChevronDown size={16} />
+      </button>
+    )
+  }
+
   function openSubCategoryPicker(target: Exclude<SubCategoryPickerTarget, null>) {
     setSubCategoryPickerTarget(target)
     setSubCategorySearch('')
@@ -1714,6 +2340,69 @@ export function OperationsPage() {
     setSubCategoryPickerTarget(null)
     setSubCategorySearch('')
     setOpenCategoryNames([])
+  }
+
+  function openBeneficiaryPicker(target: Exclude<BeneficiaryPickerTarget, null>) {
+    setBeneficiaryPickerTarget(target)
+    setBeneficiaryPickerSearch('')
+  }
+
+  function closeBeneficiaryPicker() {
+    setBeneficiaryPickerTarget(null)
+    setBeneficiaryPickerSearch('')
+  }
+
+  function currentBeneficiaryValues(): string[] {
+    if (!beneficiaryPickerTarget) {
+      return []
+    }
+
+    if (beneficiaryPickerTarget.kind === 'create') {
+      return createForm.getValues('nomsBeneficiaires') ?? []
+    }
+
+    if (beneficiaryPickerTarget.kind === 'createLine') {
+      return createForm.getValues(`lignes.${beneficiaryPickerTarget.index}.nomsBeneficiaires`) ?? []
+    }
+
+    if (beneficiaryPickerTarget.kind === 'newCreateLine') {
+      return newCreateLineForm.getValues('nomsBeneficiaires') ?? []
+    }
+
+    if (beneficiaryPickerTarget.kind === 'newLine') {
+      return newLineForm.getValues('nomsBeneficiaires') ?? []
+    }
+
+    return editForm.getValues(`lignes.${beneficiaryPickerTarget.index}.nomsBeneficiaires`) ?? []
+  }
+
+  function setCurrentBeneficiaryValues(values: string[]) {
+    const nextValues = [...values].sort((left, right) => left.localeCompare(right))
+
+    if (beneficiaryPickerTarget?.kind === 'createLine') {
+      createForm.setValue(`lignes.${beneficiaryPickerTarget.index}.nomsBeneficiaires`, nextValues, { shouldDirty: true, shouldTouch: true })
+    } else if (beneficiaryPickerTarget?.kind === 'newCreateLine') {
+      newCreateLineForm.setValue('nomsBeneficiaires', nextValues, { shouldDirty: true, shouldTouch: true })
+    } else if (beneficiaryPickerTarget?.kind === 'newLine') {
+      newLineForm.setValue('nomsBeneficiaires', nextValues, { shouldDirty: true, shouldTouch: true })
+    } else if (beneficiaryPickerTarget?.kind === 'line') {
+      editForm.setValue(`lignes.${beneficiaryPickerTarget.index}.nomsBeneficiaires`, nextValues, { shouldDirty: true, shouldTouch: true })
+    } else {
+      createForm.setValue('nomsBeneficiaires', nextValues, { shouldDirty: true, shouldTouch: true })
+    }
+  }
+
+  function toggleCurrentBeneficiary(name: string) {
+    const current = currentBeneficiaryValues()
+    setCurrentBeneficiaryValues(current.includes(name) ? current.filter((value) => value !== name) : [...current, name])
+  }
+
+  function appendCurrentBeneficiary(name: string) {
+    setCurrentBeneficiaryValues(appendUnique(currentBeneficiaryValues(), name))
+  }
+
+  function clearCurrentBeneficiaries() {
+    setCurrentBeneficiaryValues([])
   }
 
   function currentSubCategoryValue(): string {
@@ -1775,10 +2464,11 @@ export function OperationsPage() {
     setQuickAccountDialog(null)
   }
 
-  function openTypedQuickAccountDialog(kinds: Array<'interne' | 'externe'>, onCreated: (identifiant: string) => void) {
+  function openTypedQuickAccountDialog(kinds: QuickAccountKind[], onCreated: (identifiant: string) => void, internalType?: AccountTypeChoice | '') {
     openQuickAccountDialog({
-      title: quickAccountTitle(kinds),
+      title: quickAccountTitle(kinds, internalType),
       initialKind: kinds[0] ?? 'interne',
+      initialInternalType: internalType && internalType !== 'EXTERNE' && internalType !== 'TECHNIQUE' ? internalType : undefined,
       allowedKinds: kinds,
       onCreated,
     })
@@ -1793,33 +2483,50 @@ export function OperationsPage() {
   const createTrail = useMemo(() => {
     const items: Array<{ key: CreateStep; label: string }> = []
 
+    if (createPrimaryAccountType) {
+      items.push({ key: 'account', label: accountTypeLabel(createPrimaryAccountType) })
+    }
+
+    if (createPrimaryAccountId) {
+      items.push({ key: 'type', label: selectedAccountLabel(allAccounts, createPrimaryAccountId) })
+    }
+
     if (createType) {
-      items.push({ key: 'type', label: selectedType?.libelleCourt ?? createType })
+      items.push({ key: 'counterparty', label: selectedType?.libelleCourt ?? createType })
     }
 
-    if ((createStep === 'recette' || createStep === 'amount' || createStep === 'review') && depenseReady) {
+    if ((createStep === 'amount' || createStep === 'review') && depenseReady && recetteReady) {
       items.push({
-        key: 'depense',
-        label: selectedAccountLabel(allAccounts, createDepense || technicalFallbackId),
-      })
-    }
-
-    if ((createStep === 'amount' || createStep === 'review') && recetteReady) {
-      items.push({
-        key: 'recette',
-        label: selectedAccountLabel(allAccounts, createRecette || technicalFallbackId),
+        key: 'amount',
+        label: selectedAccountLabel(allAccounts, createPrimaryRole === 'depense' ? createRecette || technicalFallbackId : createDepense || technicalFallbackId),
       })
     }
 
     if (createStep === 'review' && (createAmount || createLinePayloads.length)) {
       items.push({
-        key: 'amount',
+        key: 'review',
         label: formatCurrencyFromCents(createEffectiveAmountCents),
       })
     }
 
     return items
-  }, [allAccounts, createAmount, createDepense, createEffectiveAmountCents, createLinePayloads.length, createRecette, createStep, createType, depenseReady, recetteReady, selectedType, technicalFallbackId])
+  }, [
+    allAccounts,
+    createAmount,
+    createDepense,
+    createEffectiveAmountCents,
+    createLinePayloads.length,
+    createPrimaryAccountId,
+    createPrimaryAccountType,
+    createPrimaryRole,
+    createRecette,
+    createStep,
+    createType,
+    depenseReady,
+    recetteReady,
+    selectedType,
+    technicalFallbackId,
+  ])
   const amountField = createForm.register('montant')
 
   return (
@@ -1843,12 +2550,12 @@ export function OperationsPage() {
 
       {createOpen ? (
         <div className="operation-create-overlay" role="dialog" aria-modal="true" aria-label="Nouvelle operation">
-          <button type="button" className="operation-create-backdrop" aria-label="Fermer la saisie" onClick={closeCreateFlow} />
+          <button type="button" className="operation-create-backdrop" aria-label="Fond de la saisie" disabled />
           <div className="operation-create-dialog">
             <Surface className="operation-create-panel">
               <div className="wizard-compact-top">
                 <div className="wizard-compact-leading">
-                  {createStep !== 'type' ? (
+                  {createStep !== 'account-type' ? (
                     <button type="button" className="wizard-back-button" onClick={goBack} aria-label="Revenir a l etape precedente">
                       <ArrowLeft size={15} />
                     </button>
@@ -1876,35 +2583,102 @@ export function OperationsPage() {
                   await submitCreateOperation(values, false)
                 })}
               >
+            {createStep === 'account-type' ? (
+              <section className="wizard-step">
+                <div className="wizard-step-head">
+                  <h2>Compte</h2>
+                </div>
+
+                <div className="wizard-choice-grid">
+                  {accountTypeChoices.map((type) => (
+                    <button
+                      key={type.key}
+                      type="button"
+                      className={cx('wizard-choice-card', createPrimaryAccountType === type.key && 'active')}
+                      onClick={() => selectPrimaryAccountType(type.key)}
+                    >
+                      <div>
+                        <strong>{type.label}</strong>
+                        <span>{type.description}</span>
+                      </div>
+                      <Badge>{type.count}</Badge>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+
+            {createStep === 'account' ? (
+              <section className="wizard-step">
+                <div className="wizard-step-head">
+                  <h2>{createPrimaryAccountType ? `Compte ${accountTypeLabel(createPrimaryAccountType).toLowerCase()}` : 'Compte'}</h2>
+                </div>
+
+                <div className="search-action-row">
+                  <label className="search-field search-field-thin">
+                    <Search size={14} />
+                    <input value={accountSearch} onChange={(event) => setAccountSearch(event.target.value)} placeholder="Chercher un compte..." />
+                  </label>
+                  <QuickAddButton
+                    label={createPrimaryAccountType ? quickAccountLabel([accountKindForTypeChoice(createPrimaryAccountType)], createPrimaryAccountType) : 'Creer un compte'}
+                    onClick={() => {
+                      if (createPrimaryAccountType) {
+                        openTypedQuickAccountDialog([accountKindForTypeChoice(createPrimaryAccountType)], (identifiant) => selectPrimaryAccount(identifiant), createPrimaryAccountType)
+                      }
+                    }}
+                  />
+                </div>
+
+                {!filteredCreatePrimaryAccountOptions.length ? (
+                  <EmptyState title="Aucun compte" description="Aucun compte ne correspond a cette selection." />
+                ) : (
+                  <div className="wizard-choice-grid">
+                    {filteredCreatePrimaryAccountOptions.map((account) => (
+                      <button
+                        key={account.identifiant}
+                        type="button"
+                        className={cx('wizard-choice-card', createPrimaryAccountId === account.identifiant && 'active')}
+                        onClick={() => selectPrimaryAccount(account.identifiant)}
+                      >
+                        <div>
+                          <strong>{account.identifiant}</strong>
+                          <span>{account.libelle ?? ' '}</span>
+                        </div>
+                        {createPrimaryAccountId === account.identifiant ? <Check size={16} /> : null}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </section>
+            ) : null}
+
             {createStep === 'type' ? (
               <section className="wizard-step">
                 <div className="wizard-step-head">
                   <h2>Type</h2>
                 </div>
-                <label className="search-field search-field-thin">
-                  <Search size={14} />
-                  <input value={typeSearch} onChange={(event) => setTypeSearch(event.target.value)} placeholder="Chercher un type..." />
-                </label>
 
-                {!groupedOperationTypes.length ? (
-                  <EmptyState title="Aucun type" description="Aucun type ne correspond a la recherche." />
+                {createPrimaryCompatQuery.isLoading ? (
+                  <LoadingState label="Chargement..." />
+                ) : !groupedCreateCompatibleTypes.length ? (
+                  <EmptyState title="Aucun type" description="Aucun type compatible avec ce compte." />
                 ) : (
-                  groupedOperationTypes.map((group) => (
+                  groupedCreateCompatibleTypes.map((group) => (
                     <div key={group.key} className="wizard-choice-section">
                       <span className="wizard-choice-section-label">{group.label}</span>
                       <div className="wizard-choice-grid">
-                        {group.items.map((type) => (
+                        {group.items.map((choice) => (
                           <button
-                            key={type.code}
+                            key={choice.key}
                             type="button"
-                            className={cx('wizard-choice-card', createType === type.code && 'active')}
-                            onClick={() => selectType(type.code)}
+                            className={cx('wizard-choice-card', createType === choice.type.code && createPrimaryRole === choice.role && 'active')}
+                            onClick={() => selectType(choice.type.code, choice.role)}
                           >
                             <div>
-                              <strong>{type.libelleCourt}</strong>
-                              <span>{type.code}</span>
+                              <strong>{choice.type.libelleCourt}</strong>
+                              <span>{choice.role === 'depense' ? 'Ce compte paie' : 'Ce compte recoit'}</span>
                             </div>
-                            {createType === type.code ? <Check size={16} /> : null}
+                            {createType === choice.type.code && createPrimaryRole === choice.role ? <Check size={16} /> : null}
                           </button>
                         ))}
                       </div>
@@ -1914,15 +2688,15 @@ export function OperationsPage() {
               </section>
             ) : null}
 
-            {createStep === 'depense' ? (
+            {createStep === 'counterparty' ? (
               <section className="wizard-step">
                 <div className="wizard-step-head">
-                  <h2>{createFlowLabels.depenseStep}</h2>
+                  <h2>{createPrimaryRole === 'depense' ? createFlowLabels.recetteStep : createFlowLabels.depenseStep}</h2>
                 </div>
 
-                {compatQuery.isLoading ? (
+                {counterpartyIsLoading ? (
                   <LoadingState label="Chargement..." />
-                ) : depenseIsTechnical ? (
+                ) : counterpartyIsTechnical ? (
                   <div className="wizard-locked">
                     <Badge>Technique</Badge>
                     <strong>{technicalFallbackId}</strong>
@@ -1932,29 +2706,33 @@ export function OperationsPage() {
                     <div className="search-action-row">
                       <label className="search-field search-field-thin">
                         <Search size={14} />
-                        <input value={depenseSearch} onChange={(event) => setDepenseSearch(event.target.value)} placeholder="Chercher..." />
+                        <input value={counterpartySearch} onChange={(event) => setCounterpartySearch(event.target.value)} placeholder="Chercher..." />
                       </label>
                       <QuickAddButton
-                        label={quickAccountLabel(createDepenseKinds)}
-                        onClick={() => openTypedQuickAccountDialog(createDepenseKinds, (identifiant) => selectDepenseAccount(identifiant))}
+                        label={counterpartyKinds.length ? quickAccountLabel(counterpartyKinds, counterpartySingleType) : 'Creer un compte'}
+                        onClick={() => {
+                          if (counterpartyKinds.length) {
+                            openTypedQuickAccountDialog(counterpartyKinds, (identifiant) => selectCounterpartyAccount(identifiant), counterpartySingleType)
+                          }
+                        }}
                       />
                     </div>
-                    {!filteredDepenseOptions.length ? (
+                    {!filteredCounterpartyOptions.length ? (
                       <EmptyState title="Aucun compte" description="Aucun compte compatible." />
                     ) : (
                       <div className="wizard-choice-grid">
-                        {filteredDepenseOptions.map((account) => (
+                        {filteredCounterpartyOptions.map((account) => (
                           <button
                             key={account.identifiant}
                             type="button"
-                            className={cx('wizard-choice-card', createDepense === account.identifiant && 'active')}
-                            onClick={() => selectDepenseAccount(account.identifiant)}
+                            className={cx('wizard-choice-card', (createCounterpartyRole === 'depense' ? createDepense : createRecette) === account.identifiant && 'active')}
+                            onClick={() => selectCounterpartyAccount(account.identifiant)}
                           >
                             <div>
                               <strong>{account.identifiant}</strong>
                               <span>{account.libelle ?? ' '}</span>
                             </div>
-                            {createDepense === account.identifiant ? <Check size={16} /> : null}
+                            {(createCounterpartyRole === 'depense' ? createDepense : createRecette) === account.identifiant ? <Check size={16} /> : null}
                           </button>
                         ))}
                       </div>
@@ -1994,56 +2772,6 @@ export function OperationsPage() {
               </section>
             ) : null}
 
-            {createStep === 'recette' ? (
-              <section className="wizard-step">
-                <div className="wizard-step-head">
-                  <h2>{createFlowLabels.recetteStep}</h2>
-                </div>
-
-                {refinedRecetteQuery.isLoading ? (
-                  <LoadingState label="Chargement..." />
-                ) : recetteIsTechnical ? (
-                  <div className="wizard-locked">
-                    <Badge>Technique</Badge>
-                    <strong>{technicalFallbackId}</strong>
-                  </div>
-                ) : (
-                  <>
-                    <div className="search-action-row">
-                      <label className="search-field search-field-thin">
-                        <Search size={14} />
-                        <input value={recetteSearch} onChange={(event) => setRecetteSearch(event.target.value)} placeholder="Chercher..." />
-                      </label>
-                      <QuickAddButton
-                        label={quickAccountLabel(createRecetteKinds)}
-                        onClick={() => openTypedQuickAccountDialog(createRecetteKinds, (identifiant) => selectRecetteAccount(identifiant))}
-                      />
-                    </div>
-                    {!filteredRecetteOptions.length ? (
-                      <EmptyState title="Aucun compte" description="Aucun compte compatible." />
-                    ) : (
-                      <div className="wizard-choice-grid">
-                        {filteredRecetteOptions.map((account) => (
-                          <button
-                            key={account.identifiant}
-                            type="button"
-                            className={cx('wizard-choice-card', createRecette === account.identifiant && 'active')}
-                            onClick={() => selectRecetteAccount(account.identifiant)}
-                          >
-                            <div>
-                              <strong>{account.identifiant}</strong>
-                              <span>{account.libelle ?? ' '}</span>
-                            </div>
-                            {createRecette === account.identifiant ? <Check size={16} /> : null}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </>
-                )}
-              </section>
-            ) : null}
-
             {createStep === 'review' ? (
               <section className="wizard-step">
                 <div className="wizard-step-head">
@@ -2054,22 +2782,18 @@ export function OperationsPage() {
                   <button type="button" className="wizard-summary-card editable" onClick={() => setQuickEditTarget('type')}>
                     <span>Type</span>
                     <strong>{selectedType?.libelleCourt ?? createType}</strong>
-                    <Pencil size={14} />
                   </button>
                   <button type="button" className="wizard-summary-card editable" onClick={() => setQuickEditTarget('depense')}>
                     <span>{createFlowLabels.depenseSummary}</span>
                     <strong>{selectedAccountLabel(allAccounts, createDepense || technicalFallbackId)}</strong>
-                    <Pencil size={14} />
                   </button>
                   <button type="button" className="wizard-summary-card editable" onClick={() => setQuickEditTarget('recette')}>
                     <span>{createFlowLabels.recetteSummary}</span>
                     <strong>{selectedAccountLabel(allAccounts, createRecette || technicalFallbackId)}</strong>
-                    <Pencil size={14} />
                   </button>
                   <button type="button" className="wizard-summary-card editable" onClick={() => setQuickEditTarget('amount')}>
                     <span>Montant</span>
                     <strong>{formatCurrencyFromCents(createEffectiveAmountCents)}</strong>
-                    <Pencil size={14} />
                   </button>
                 </div>
 
@@ -2103,45 +2827,14 @@ export function OperationsPage() {
                 </div>
 
                 {currentTypeNeedsReference ? (
-                  <div className="form-field">
-                    <span className="form-field-label">Beneficiaires</span>
-                    <div className="checkbox-grid">
-                      <QuickAddButton
-                        label="Creer un nouveau beneficiaire"
-                        onClick={() =>
-                          openQuickReferenceDialog({
-                            resource: 'beneficiaire',
-                            title: 'Nouveau beneficiaire',
-                            onCreated: (name) => {
-                              createForm.setValue('nomsBeneficiaires', appendUnique(createForm.getValues('nomsBeneficiaires'), name), {
-                                shouldDirty: true,
-                                shouldTouch: true,
-                              })
-                            },
-                          })
-                        }
-                      />
-                      {(beneficiairesQuery.data ?? []).map((item) => {
-                        const checked = createBeneficiaries.includes(item.nom)
-                        return (
-                          <label key={item.nom} className={cx('toggle-chip', checked && 'checked')}>
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() => {
-                                const values = createForm.getValues('nomsBeneficiaires')
-                                createForm.setValue(
-                                  'nomsBeneficiaires',
-                                  checked ? values.filter((value) => value !== item.nom) : [...values, item.nom],
-                                )
-                              }}
-                            />
-                            <span>{item.nom}</span>
-                          </label>
-                        )
-                      })}
-                    </div>
-                  </div>
+                  <FormField label="Beneficiaires">
+                    <button type="button" className="picker-field" onClick={() => openBeneficiaryPicker({ kind: 'create' })}>
+                      <div className="picker-field-content">
+                        <strong>{beneficiarySelectionLabel(createBeneficiaries)}</strong>
+                      </div>
+                      <ChevronDown size={16} />
+                    </button>
+                  </FormField>
                 ) : null}
 
                 {createLines.length ? (
@@ -2157,41 +2850,14 @@ export function OperationsPage() {
                   </div>
                 ) : null}
 
-                <div className="button-row wizard-review-actions">
-                  <Button type="button" tone="ghost" onClick={toggleCreateOptionsPanel}>
-                    Options
-                    {createLines.length ? <Badge>{createLines.length}</Badge> : null}
-                  </Button>
-                  {!createOptionsOpen ? (
-                    <>
-                      <Button type="button" tone="soft" disabled={createSubmitDisabled} onClick={createForm.handleSubmit((values) => submitCreateOperation(values, true))}>
-                        <Plus size={16} />
-                        Valider + nouvelle similaire
-                      </Button>
-                      <Button type="submit" disabled={createSubmitDisabled}>
-                        <Save size={16} />
-                        Valider
-                      </Button>
-                    </>
-                  ) : null}
-                </div>
-
-                {createOptionsOpen ? (
-                  <div className="wizard-advanced" ref={createOptionsPanelRef}>
-                    <div className="form-grid">
-                      <FormField label="Numero">
-                        <input {...createForm.register('numero')} placeholder="Facultatif" />
-                      </FormField>
-                    </div>
-
-                    <div className="page-stack">
+                <div className="page-stack operation-lines-section">
                       <div className="section-header">
                         <div>
                           <h2>Lignes</h2>
                         </div>
                         <Button type="button" tone="ghost" disabled={hasCreateLineOverflow} onClick={openCreateLineCreatePanel}>
                           <Plus size={16} />
-                          Ajouter
+                          Ajouter ligne
                         </Button>
                       </div>
 
@@ -2200,18 +2866,11 @@ export function OperationsPage() {
                           {createLineFieldArray.fields.map((field, index) => {
                             const currentLine = createLines[index]
                             const isPrimaryLine = index === createPrimaryLineIndex
-                            const currentBenefs = isPrimaryLine ? createBeneficiaries : currentLine?.nomsBeneficiaires ?? []
+                            const currentBenefs = currentLine?.nomsBeneficiaires ?? []
                             const lineDirty = createLineIsDirty(index)
                             const lineAmountError = createLineErrors[index]
                             const isOpen = expandedCreateLineIndex === index
-                            const lineTitle = isPrimaryLine ? 'Ligne 0' : currentLine?.libelle?.trim() || `Ligne ${index}`
-                            const lineMeta = [
-                              isPrimaryLine ? formatDate(createDateValeur) : currentLine?.dateComptabilisation ? formatDate(currentLine.dateComptabilisation) : null,
-                              formatCurrencyFromCents(isPrimaryLine ? createPrimaryRemainingCents : parseMoneyToCents(currentLine?.montant ?? '')),
-                              isPrimaryLine ? createNomSousCategorie || null : currentLine?.nomSousCategorie?.trim() || null,
-                            ]
-                              .filter(Boolean)
-                              .join(' · ')
+                            const lineTitle = lineDisplayTitle(index, isPrimaryLine ? 0 : field.numeroLigne)
 
                             return (
                               <div
@@ -2225,16 +2884,32 @@ export function OperationsPage() {
                                     <button type="button" className="line-editor-toggle" onClick={() => toggleCreateLine(index)}>
                                       <div className="line-editor-copy">
                                         <strong>{lineTitle}</strong>
-                                        <span>{lineMeta || 'Sans detail'}</span>
                                       </div>
                                       <ChevronDown size={16} />
                                     </button>
 
                                     <div className="line-editor-actions">
-                                      {(isPrimaryLine ? createNomSousCategorie : currentLine?.nomSousCategorie) ? (
-                                        <Badge>{isPrimaryLine ? createNomSousCategorie : currentLine?.nomSousCategorie}</Badge>
+                                      {currentLine?.nomSousCategorie ? <Badge>{currentLine.nomSousCategorie}</Badge> : null}
+                                      {currentBenefs.length ? <Badge>{beneficiarySelectionLabel(currentBenefs)}</Badge> : null}
+                                      {!isPrimaryLine ? (
+                                        <Button
+                                          type="button"
+                                          tone="danger"
+                                          className="line-editor-delete-button"
+                                          onClick={() => {
+                                            createLineFieldArray.remove(index)
+                                            setCreateLineBaselines((current) => current.filter((_, lineIndex) => lineIndex !== index))
+                                            setExpandedCreateLineIndex((current) => {
+                                              if (current == null) return null
+                                              if (current === index) return null
+                                              return current > index ? current - 1 : current
+                                            })
+                                          }}
+                                        >
+                                          <Trash2 size={16} />
+                                          Supprimer
+                                        </Button>
                                       ) : null}
-                                      {currentBenefs.length ? <Badge>{`${currentBenefs.length} beneficiaire${currentBenefs.length > 1 ? 's' : ''}`}</Badge> : null}
                                     </div>
                                   </div>
 
@@ -2242,53 +2917,25 @@ export function OperationsPage() {
                                     <div className="line-editor-body">
                                       <div className="section-header">
                                         <div>
-                                          <h2>{isPrimaryLine ? 'Ligne 0' : `Ligne ${index}`}</h2>
-                                          {(isPrimaryLine ? createNomSousCategorie : currentLine?.nomSousCategorie) || currentBenefs.length ? (
+                                          <h2>{lineTitle}</h2>
+                                          {currentLine?.nomSousCategorie || currentBenefs.length ? (
                                             <div className="pill-list">
-                                              {(isPrimaryLine ? createNomSousCategorie : currentLine?.nomSousCategorie) ? (
-                                                <Badge>{isPrimaryLine ? createNomSousCategorie : currentLine?.nomSousCategorie}</Badge>
-                                              ) : null}
+                                              {currentLine?.nomSousCategorie ? <Badge>{currentLine.nomSousCategorie}</Badge> : null}
                                               {currentBenefs.map((name) => (
                                                 <Badge key={`${field.id}-${name}`}>{name}</Badge>
                                               ))}
                                             </div>
                                           ) : null}
                                         </div>
-                                        {!isPrimaryLine ? (
-                                          <Button
-                                            type="button"
-                                            tone="danger"
-                                            onClick={() => {
-                                              createLineFieldArray.remove(index)
-                                              setCreateLineBaselines((current) => current.filter((_, lineIndex) => lineIndex !== index))
-                                              setExpandedCreateLineIndex((current) => {
-                                                if (current == null) return null
-                                                if (current === index) return null
-                                                return current > index ? current - 1 : current
-                                              })
-                                            }}
-                                          >
-                                            <Trash2 size={16} />
-                                            Retirer
-                                          </Button>
-                                        ) : null}
                                       </div>
 
                                       <div className="form-grid three-columns">
                                         <FormField label="Libelle">
-                                          {isPrimaryLine ? (
-                                            <input {...createForm.register('libelle')} placeholder="Aucun" />
-                                          ) : (
-                                            <input {...createForm.register(`lignes.${index}.libelle`)} />
-                                          )}
+                                          <input {...createForm.register(`lignes.${index}.libelle`)} />
                                         </FormField>
 
                                         <FormField label="Date">
-                                          {isPrimaryLine ? (
-                                            <input type="date" {...createForm.register('dateValeur')} />
-                                          ) : (
-                                            <input type="date" {...createForm.register(`lignes.${index}.dateComptabilisation`)} />
-                                          )}
+                                          <input type="date" {...createForm.register(`lignes.${index}.dateComptabilisation`)} />
                                         </FormField>
 
                                         <FormField label="Montant">
@@ -2306,12 +2953,12 @@ export function OperationsPage() {
                                           <button
                                             type="button"
                                             className="picker-field"
-                                            onClick={() => openSubCategoryPicker(isPrimaryLine ? { kind: 'create' } : { kind: 'createLine', index })}
+                                            onClick={() => openSubCategoryPicker({ kind: 'createLine', index })}
                                           >
                                             <div className="picker-field-content">
-                                              {(isPrimaryLine ? createNomSousCategorie : currentLine?.nomSousCategorie) ? (
+                                              {currentLine?.nomSousCategorie ? (
                                                 <div className="picker-chip-list">
-                                                  <span className="picker-chip">{isPrimaryLine ? createNomSousCategorie : currentLine?.nomSousCategorie}</span>
+                                                  <span className="picker-chip">{currentLine.nomSousCategorie}</span>
                                                 </div>
                                               ) : (
                                                 <span>Choisir</span>
@@ -2321,64 +2968,14 @@ export function OperationsPage() {
                                           </button>
                                         </FormField>
 
-                                        <div className="form-field full-span">
-                                          <span className="form-field-label">Beneficiaires</span>
-                                          <div className="checkbox-grid">
-                                            <QuickAddButton
-                                              label="Creer un nouveau beneficiaire"
-                                              onClick={() =>
-                                                openQuickReferenceDialog({
-                                                  resource: 'beneficiaire',
-                                                  title: 'Nouveau beneficiaire',
-                                                  onCreated: (name) => {
-                                                    if (isPrimaryLine) {
-                                                      createForm.setValue('nomsBeneficiaires', appendUnique(createForm.getValues('nomsBeneficiaires'), name), {
-                                                        shouldDirty: true,
-                                                        shouldTouch: true,
-                                                      })
-                                                      return
-                                                    }
-
-                                                    createForm.setValue(
-                                                      `lignes.${index}.nomsBeneficiaires`,
-                                                      appendUnique(createForm.getValues(`lignes.${index}.nomsBeneficiaires`), name),
-                                                      { shouldDirty: true, shouldTouch: true },
-                                                    )
-                                                  },
-                                                })
-                                              }
-                                            />
-                                            {(beneficiairesQuery.data ?? []).map((item) => {
-                                              const checked = currentBenefs.includes(item.nom)
-                                              return (
-                                                <label key={item.nom} className={cx('toggle-chip', checked && 'checked')}>
-                                                  <input
-                                                    type="checkbox"
-                                                    checked={checked}
-                                                    onChange={() => {
-                                                      if (isPrimaryLine) {
-                                                        const values = createForm.getValues('nomsBeneficiaires')
-                                                        createForm.setValue('nomsBeneficiaires', checked ? values.filter((value) => value !== item.nom) : [...values, item.nom], {
-                                                          shouldDirty: true,
-                                                          shouldTouch: true,
-                                                        })
-                                                        return
-                                                      }
-
-                                                      const values = createForm.getValues(`lignes.${index}.nomsBeneficiaires`)
-                                                      createForm.setValue(
-                                                        `lignes.${index}.nomsBeneficiaires`,
-                                                        checked ? values.filter((value) => value !== item.nom) : [...values, item.nom],
-                                                        { shouldDirty: true, shouldTouch: true },
-                                                      )
-                                                    }}
-                                                  />
-                                                  <span>{item.nom}</span>
-                                                </label>
-                                              )
-                                            })}
-                                          </div>
-                                        </div>
+                                        <FormField label="Beneficiaires">
+                                          <button type="button" className="picker-field" onClick={() => openBeneficiaryPicker({ kind: 'createLine', index })}>
+                                            <div className="picker-field-content">
+                                              <strong>{beneficiarySelectionLabel(currentBenefs)}</strong>
+                                            </div>
+                                            <ChevronDown size={16} />
+                                          </button>
+                                        </FormField>
                                       </div>
 
                                       {lineDirty ? (
@@ -2408,20 +3005,18 @@ export function OperationsPage() {
                           })}
                         </div>
                       ) : null}
-                    </div>
+                </div>
 
-                    <div className="button-row line-editor-submit-row">
-                      <Button type="button" tone="soft" disabled={createSubmitDisabled} onClick={createForm.handleSubmit((values) => submitCreateOperation(values, true))}>
-                        <Plus size={16} />
-                        Valider + nouvelle similaire
-                      </Button>
-                      <Button type="submit" disabled={createSubmitDisabled}>
-                        <Save size={16} />
-                        Valider
-                      </Button>
-                    </div>
-                  </div>
-                ) : null}
+                <div className="button-row line-editor-submit-row">
+                  <Button type="button" tone="soft" disabled={createSubmitDisabled} onClick={createForm.handleSubmit((values) => submitCreateOperation(values, true))}>
+                    <Plus size={16} />
+                    Valider + nouvelle similaire
+                  </Button>
+                  <Button type="submit" disabled={createSubmitDisabled}>
+                    <Save size={16} />
+                    Valider
+                  </Button>
+                </div>
               </section>
             ) : null}
               </form>
@@ -2447,10 +3042,6 @@ export function OperationsPage() {
 
                     {quickEditTarget === 'type' ? (
                       <div className="page-stack">
-                        <label className="search-field search-field-thin">
-                          <Search size={14} />
-                          <input value={typeSearch} onChange={(event) => setTypeSearch(event.target.value)} placeholder="Chercher..." />
-                        </label>
                         {groupedOperationTypes.map((group) => (
                           <div key={group.key} className="wizard-choice-section">
                             <span className="wizard-choice-section-label">{group.label}</span>
@@ -2592,45 +3183,64 @@ export function OperationsPage() {
       ) : null}
 
       <div className={cx('operations-content', createOpen && 'muted')}>
-        {operationsQuery.isLoading ? <LoadingState label="Chargement des operations..." /> : null}
+        {operationListLoading ? <LoadingState label="Chargement des operations..." /> : null}
         {hasError ? <ErrorState message={apiErrorMessage(hasError)} /> : null}
 
         <Surface className="catalog-panel">
-          <FilterBar>
-            <label className="search-field">
-              <Search size={16} />
-              <input
-                value={search}
-                onChange={(event) => {
-                  setSearch(event.target.value)
-                  setOperationPageIndex(1)
-                }}
-                placeholder="Chercher une operation..."
-              />
-            </label>
+          <div className="operation-filter-stack">
+            <div className="operation-filter-row">
+              {renderOperationFilterButton(
+                'Type',
+                compactFilterLabel(selectedTypeFilterItems.map((type) => type.libelleCourt), 'Tous'),
+                'type',
+              )}
+              {renderOperationFilterButton(
+                'Type compte',
+                compactFilterLabel(selectedAccountTypeFilters.map(accountTypeLabel), 'Tous'),
+                'account-type',
+              )}
+              {renderOperationFilterButton(
+                'Compte',
+                compactFilterLabel(selectedAccountFilterItems.map((account) => account.identifiant), 'Tous'),
+                'account',
+              )}
+              {renderOperationFilterButton('Beneficiaires', compactFilterLabel(selectedBeneficiaryFilters, 'Tous'), 'beneficiary')}
+              <Button type="button" tone="ghost" onClick={clearOperationFilters}>
+                Reinitialiser
+              </Button>
+            </div>
 
-            <button type="button" className="picker-field picker-field-compact" onClick={() => setTypeFilterPickerOpen(true)}>
-              <div className="picker-field-content">
-                {selectedTypeFilterItems.length ? (
-                  <div className="picker-chip-list">
-                    {selectedTypeFilterItems.slice(0, 3).map((type) => (
-                      <span key={type.code} className="picker-chip">
-                        {type.libelleCourt}
-                      </span>
-                    ))}
-                    {selectedTypeFilterItems.length > 3 ? <span className="picker-chip">+{selectedTypeFilterItems.length - 3}</span> : null}
-                  </div>
-                ) : (
-                  <span>Tous les types</span>
-                )}
-              </div>
-              <ChevronDown size={16} />
-            </button>
-          </FilterBar>
+            <div className="operation-filter-row operation-filter-row-secondary">
+              {renderOperationFilterButton(
+                'Montant',
+                compactFilterLabel(activeAmountFilters.map(amountFilterLabel), 'Tous'),
+                'amount',
+              )}
+              {renderOperationFilterButton(
+                'Date',
+                compactFilterLabel(activeDateFilters.map((filter) => (filter.to ? `${filter.from || filter.to} - ${filter.to}` : filter.from || filter.to)), 'Toutes'),
+                'date',
+              )}
+            </div>
 
-          {renderOperationPaginationControls('top')}
+            <div className="operation-search-pagination-row">
+              <label className="search-field operation-history-search">
+                <Search size={16} />
+                <input
+                  value={search}
+                  onChange={(event) => {
+                    setSearch(event.target.value)
+                    setOperationPageIndex(1)
+                  }}
+                  placeholder="Chercher par libelle ou compte..."
+                />
+              </label>
 
-          {!operationsQuery.isLoading && !filteredOperations.length ? (
+              {renderOperationPaginationControls('top')}
+            </div>
+          </div>
+
+          {!operationListLoading && !filteredOperations.length ? (
             <EmptyState title="Aucune operation visible" description="La liste est vide ou le filtre ne matche rien." />
           ) : (
             <div className="operation-history-list">
@@ -2679,40 +3289,41 @@ export function OperationsPage() {
       </div>
 
       <OverlayPanel
-        open={typeFilterPickerOpen}
-        onClose={() => setTypeFilterPickerOpen(false)}
-        title="Filtrer les types"
+        open={operationFilterPicker === 'type'}
+        onClose={() => setOperationFilterPicker(null)}
+        title="Type d'operations"
         width="regular"
         overlayClassName="overlay-top"
+        className="filter-panel"
       >
-        <div className="page-stack">
-          <label className="search-field search-field-thin">
-            <Search size={14} />
-            <input value={typeFilterSearch} onChange={(event) => setTypeFilterSearch(event.target.value)} placeholder="Chercher un type..." />
-          </label>
-
-          <div className="button-row">
-            <Button type="button" tone="ghost" onClick={clearTypeFilters}>
-              Tout afficher
-            </Button>
+        <div className="filter-panel-shell">
+          <div className="filter-panel-sticky">
+            <div className="filter-panel-toolbar">
+              <Button type="button" tone="ghost" onClick={clearTypeFilters}>
+                Reinitialiser
+              </Button>
+              <Button type="button" onClick={() => setOperationFilterPicker(null)}>
+                Valider
+              </Button>
+            </div>
           </div>
 
           {!groupedFilterOperationTypes.length ? (
-            <EmptyState title="Aucun type" description="Aucun type ne correspond a la recherche." />
+            <EmptyState title="Aucun type" description="Aucun type d operation disponible." />
           ) : (
             groupedFilterOperationTypes.map((group) => (
-              <div key={group.key} className="wizard-choice-section">
+              <div key={group.key} className="wizard-choice-section filter-choice-section">
                 <span className="wizard-choice-section-label">{group.label}</span>
-                <div className="wizard-choice-grid">
+                <div className="wizard-choice-grid filter-choice-grid dense">
                   {group.items.map((type) => {
                     const active = selectedTypeFilters.includes(type.code)
                     return (
-                      <button key={type.code} type="button" className={cx('wizard-choice-card', active && 'active')} onClick={() => toggleTypeFilter(type.code)}>
+                      <button key={type.code} type="button" className={cx('wizard-choice-card filter-choice-card dense', active && 'active')} onClick={() => toggleTypeFilter(type.code)}>
                         <div>
                           <strong>{type.libelleCourt}</strong>
                           <span>{type.code}</span>
                         </div>
-                        {active ? <Check size={16} /> : null}
+                        {active ? <Check size={15} /> : null}
                       </button>
                     )
                   })}
@@ -2720,6 +3331,185 @@ export function OperationsPage() {
               </div>
             ))
           )}
+        </div>
+      </OverlayPanel>
+
+      <OverlayPanel
+        open={operationFilterPicker === 'account-type'}
+        onClose={() => setOperationFilterPicker(null)}
+        title="Types de comptes"
+        width="regular"
+        overlayClassName="overlay-top"
+        className="filter-panel"
+      >
+        <div className="filter-panel-shell">
+          <div className="filter-panel-sticky">
+            <div className="filter-panel-toolbar">
+              <Button type="button" tone="ghost" onClick={() => {
+                setOperationPageIndex(1)
+                setSelectedAccountTypeFilters([])
+              }}>
+                Reinitialiser
+              </Button>
+              <Button type="button" onClick={() => setOperationFilterPicker(null)}>
+                Valider
+              </Button>
+            </div>
+          </div>
+          <div className="wizard-choice-grid filter-choice-grid">
+            {ACCOUNT_TYPE_META.map((type) => {
+              const active = selectedAccountTypeFilters.includes(type.key)
+              return (
+                <button key={type.key} type="button" className={cx('wizard-choice-card filter-choice-card', active && 'active')} onClick={() => toggleAccountTypeFilter(type.key)}>
+                  <div>
+                    <strong>{type.label}</strong>
+                    <span>{type.description}</span>
+                  </div>
+                  {active ? <Check size={16} /> : null}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      </OverlayPanel>
+
+      <OverlayPanel open={operationFilterPicker === 'account'} onClose={() => setOperationFilterPicker(null)} title="Comptes" width="regular" overlayClassName="overlay-top" className="filter-panel">
+        <div className="filter-panel-shell">
+          <div className="filter-panel-sticky">
+            <div className="filter-panel-toolbar">
+              <Button type="button" tone="ghost" onClick={() => {
+                setOperationPageIndex(1)
+                setSelectedAccountFilters([])
+              }}>
+                Reinitialiser
+              </Button>
+              <Button type="button" onClick={() => setOperationFilterPicker(null)}>
+                Valider
+              </Button>
+            </div>
+            <label className="search-field search-field-thin filter-panel-search">
+              <Search size={14} />
+              <input value={accountFilterSearch} onChange={(event) => setAccountFilterSearch(event.target.value)} placeholder="Chercher un compte..." />
+            </label>
+          </div>
+
+          {!filteredAccountChoicesForFilter.length ? (
+            <EmptyState title="Aucun compte" description="Aucun compte ne correspond a la recherche." />
+          ) : (
+            <div className="wizard-choice-grid filter-choice-grid">
+              {filteredAccountChoicesForFilter.map((account) => {
+                const active = selectedAccountFilters.includes(account.identifiant)
+                return (
+                  <button key={account.identifiant} type="button" className={cx('wizard-choice-card filter-choice-card compact', active && 'active')} onClick={() => toggleAccountFilter(account.identifiant)}>
+                    <div>
+                      <strong>{account.identifiant}</strong>
+                      <span>{account.libelle ?? accountTypeLabel(accountTypeChoiceForAccount(account, internalAccountIds, externalAccountIds, technicalAccountIds) ?? 'EXTERNE')}</span>
+                    </div>
+                    {active ? <Check size={16} /> : null}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      </OverlayPanel>
+
+      <OverlayPanel open={operationFilterPicker === 'beneficiary'} onClose={() => setOperationFilterPicker(null)} title="Beneficiaires" width="regular" overlayClassName="overlay-top" className="filter-panel">
+        <div className="filter-panel-shell">
+          <div className="filter-panel-sticky">
+            <div className="filter-panel-toolbar">
+              <Button type="button" tone="ghost" onClick={() => {
+                setOperationPageIndex(1)
+                setSelectedBeneficiaryFilters([])
+              }}>
+                Reinitialiser
+              </Button>
+              <Button type="button" onClick={() => setOperationFilterPicker(null)}>
+                Valider
+              </Button>
+            </div>
+            <label className="search-field search-field-thin filter-panel-search">
+              <Search size={14} />
+              <input value={beneficiaryFilterSearch} onChange={(event) => setBeneficiaryFilterSearch(event.target.value)} placeholder="Chercher un beneficiaire..." />
+            </label>
+          </div>
+
+          {!filteredBeneficiaryFilterOptions.length ? (
+            <EmptyState title="Aucun beneficiaire" description="Aucun beneficiaire ne correspond a la recherche." />
+          ) : (
+            <div className="wizard-choice-grid filter-choice-grid">
+              {filteredBeneficiaryFilterOptions.map((beneficiaire) => {
+                const active = selectedBeneficiaryFilters.includes(beneficiaire.nom)
+                return (
+                  <button key={beneficiaire.nom} type="button" className={cx('wizard-choice-card filter-choice-card compact', active && 'active')} onClick={() => toggleBeneficiaryFilter(beneficiaire.nom)}>
+                    <div>
+                      <strong>{beneficiaire.nom}</strong>
+                      <span>{beneficiaire.libelle ?? ' '}</span>
+                    </div>
+                    {active ? <Check size={16} /> : null}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      </OverlayPanel>
+
+      <OverlayPanel open={operationFilterPicker === 'date'} onClose={() => setOperationFilterPicker(null)} title="Dates" width="regular" overlayClassName="overlay-top" className="filter-panel">
+        <div className="filter-panel-shell">
+          <div className="filter-panel-sticky">
+            <div className="filter-panel-toolbar">
+              <Button type="button" tone="ghost" onClick={clearDateFilters}>
+                Reinitialiser
+              </Button>
+              <Button type="button" onClick={() => setOperationFilterPicker(null)}>
+                Valider
+              </Button>
+            </div>
+          </div>
+          <div className="range-filter-list">
+            {dateFilters.map((filter, index) => (
+              <div key={index} className="range-filter-row">
+                <FormField label={index === 0 ? 'Jour ou debut' : 'Autre jour ou debut'}>
+                  <input type="date" value={filter.from} onChange={(event) => updateDateFilter(index, 'from', event.target.value)} />
+                </FormField>
+                {filter.from || filter.to ? (
+                  <FormField label="Fin de periode">
+                    <input type="date" value={filter.to} onChange={(event) => updateDateFilter(index, 'to', event.target.value)} />
+                  </FormField>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      </OverlayPanel>
+
+      <OverlayPanel open={operationFilterPicker === 'amount'} onClose={() => setOperationFilterPicker(null)} title="Montants" width="regular" overlayClassName="overlay-top" className="filter-panel">
+        <div className="filter-panel-shell">
+          <div className="filter-panel-sticky">
+            <div className="filter-panel-toolbar">
+              <Button type="button" tone="ghost" onClick={clearAmountFilters}>
+                Reinitialiser
+              </Button>
+              <Button type="button" onClick={() => setOperationFilterPicker(null)}>
+                Valider
+              </Button>
+            </div>
+          </div>
+          <div className="range-filter-list">
+            {amountFilters.map((filter, index) => (
+              <div key={index} className="range-filter-row">
+                <FormField label={index === 0 ? 'Montant ou minimum' : 'Autre montant ou minimum'}>
+                  <input value={filter.from} inputMode="numeric" onChange={(event) => updateAmountFilter(index, 'from', event.target.value)} placeholder="Ex. 25" />
+                </FormField>
+                {filter.from || filter.to ? (
+                  <FormField label="Maximum">
+                    <input value={filter.to} inputMode="numeric" onChange={(event) => updateAmountFilter(index, 'to', event.target.value)} placeholder="Ex. 80" />
+                  </FormField>
+                ) : null}
+              </div>
+            ))}
+          </div>
         </div>
       </OverlayPanel>
 
@@ -2756,7 +3546,7 @@ export function OperationsPage() {
                     <button key={item.nom} type="button" className={cx('picker-option', selected && 'selected')} onClick={() => toggleSubCategory(item.nom)}>
                       <div>
                         <strong>{item.nom}</strong>
-                        <span>{item.nomCategorie ?? 'Sans categorie'}</span>
+                        <span>{item.libelle ?? ' '}</span>
                       </div>
                       {selected ? <Check size={16} /> : null}
                     </button>
@@ -2793,6 +3583,54 @@ export function OperationsPage() {
                       </div>
                     ) : null}
                   </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      </OverlayPanel>
+
+      <OverlayPanel open={Boolean(beneficiaryPickerTarget)} onClose={closeBeneficiaryPicker} title="Beneficiaires" width="regular" overlayClassName="overlay-super-top" className="filter-panel">
+        <div className="filter-panel-shell">
+          <div className="filter-panel-sticky">
+            <div className="filter-panel-toolbar beneficiary-picker-toolbar">
+              <label className="search-field search-field-thin beneficiary-picker-search">
+                <Search size={14} />
+                <input value={beneficiaryPickerSearch} onChange={(event) => setBeneficiaryPickerSearch(event.target.value)} placeholder="Chercher un beneficiaire..." />
+              </label>
+              <QuickAddButton
+                label="Creer un nouveau beneficiaire"
+                onClick={() =>
+                  openQuickReferenceDialog({
+                    resource: 'beneficiaire',
+                    title: 'Nouveau beneficiaire',
+                    onCreated: appendCurrentBeneficiary,
+                  })
+                }
+              />
+              <Button type="button" tone="ghost" onClick={clearCurrentBeneficiaries}>
+                Reinitialiser
+              </Button>
+              <Button type="button" onClick={closeBeneficiaryPicker}>
+                Valider
+              </Button>
+            </div>
+          </div>
+
+          {!filteredBeneficiaryPickerOptions.length ? (
+            <EmptyState title="Aucun beneficiaire" description="Aucun beneficiaire ne correspond a la recherche." />
+          ) : (
+            <div className="wizard-choice-grid filter-choice-grid">
+              {filteredBeneficiaryPickerOptions.map((beneficiaire) => {
+                const active = currentBeneficiaryValues().includes(beneficiaire.nom)
+                return (
+                  <button key={beneficiaire.nom} type="button" className={cx('wizard-choice-card filter-choice-card compact', active && 'active')} onClick={() => toggleCurrentBeneficiary(beneficiaire.nom)}>
+                    <div>
+                      <strong>{beneficiaire.nom}</strong>
+                      <span>{beneficiaire.libelle ?? ' '}</span>
+                    </div>
+                    {active ? <Check size={16} /> : null}
+                  </button>
                 )
               })}
             </div>
@@ -2840,45 +3678,14 @@ export function OperationsPage() {
               </button>
             </FormField>
 
-            <div className="form-field full-span">
-              <span className="form-field-label">Beneficiaires</span>
-              <div className="checkbox-grid">
-                <QuickAddButton
-                  label="Creer un nouveau beneficiaire"
-                  onClick={() =>
-                    openQuickReferenceDialog({
-                      resource: 'beneficiaire',
-                      title: 'Nouveau beneficiaire',
-                      onCreated: (name) => {
-                        newCreateLineForm.setValue('nomsBeneficiaires', appendUnique(newCreateLineForm.getValues('nomsBeneficiaires'), name), {
-                          shouldDirty: true,
-                          shouldTouch: true,
-                        })
-                      },
-                    })
-                  }
-                />
-                {(beneficiairesQuery.data ?? []).map((item) => {
-                  const checked = newCreateLineBeneficiaries.includes(item.nom)
-                  return (
-                    <label key={item.nom} className={cx('toggle-chip', checked && 'checked')}>
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() => {
-                          const values = newCreateLineForm.getValues('nomsBeneficiaires')
-                          newCreateLineForm.setValue('nomsBeneficiaires', checked ? values.filter((value) => value !== item.nom) : [...values, item.nom], {
-                            shouldDirty: true,
-                            shouldTouch: true,
-                          })
-                        }}
-                      />
-                      <span>{item.nom}</span>
-                    </label>
-                  )
-                })}
-              </div>
-            </div>
+            <FormField label="Beneficiaires">
+              <button type="button" className="picker-field" onClick={() => openBeneficiaryPicker({ kind: 'newCreateLine' })}>
+                <div className="picker-field-content">
+                  <strong>{beneficiarySelectionLabel(newCreateLineBeneficiaries)}</strong>
+                </div>
+                <ChevronDown size={16} />
+              </button>
+            </FormField>
           </div>
 
           <div className="line-editor-footer">
@@ -2935,45 +3742,14 @@ export function OperationsPage() {
               </button>
             </FormField>
 
-            <div className="form-field full-span">
-              <span className="form-field-label">Beneficiaires</span>
-              <div className="checkbox-grid">
-                <QuickAddButton
-                  label="Creer un nouveau beneficiaire"
-                  onClick={() =>
-                    openQuickReferenceDialog({
-                      resource: 'beneficiaire',
-                      title: 'Nouveau beneficiaire',
-                      onCreated: (name) => {
-                        newLineForm.setValue('nomsBeneficiaires', appendUnique(newLineForm.getValues('nomsBeneficiaires'), name), {
-                          shouldDirty: true,
-                          shouldTouch: true,
-                        })
-                      },
-                    })
-                  }
-                />
-                {(beneficiairesQuery.data ?? []).map((item) => {
-                  const checked = newLineBeneficiaries.includes(item.nom)
-                  return (
-                    <label key={item.nom} className={cx('toggle-chip', checked && 'checked')}>
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() => {
-                          const values = newLineForm.getValues('nomsBeneficiaires')
-                          newLineForm.setValue('nomsBeneficiaires', checked ? values.filter((value) => value !== item.nom) : [...values, item.nom], {
-                            shouldDirty: true,
-                            shouldTouch: true,
-                          })
-                        }}
-                      />
-                      <span>{item.nom}</span>
-                    </label>
-                  )
-                })}
-              </div>
-            </div>
+            <FormField label="Beneficiaires">
+              <button type="button" className="picker-field" onClick={() => openBeneficiaryPicker({ kind: 'newLine' })}>
+                <div className="picker-field-content">
+                  <strong>{beneficiarySelectionLabel(newLineBeneficiaries)}</strong>
+                </div>
+                <ChevronDown size={16} />
+              </button>
+            </FormField>
           </div>
 
           <div className="line-editor-footer">
@@ -2991,25 +3767,35 @@ export function OperationsPage() {
       <OverlayPanel
         open={Boolean(selectedNumero)}
         onClose={closeDetailOverlay}
-        title={selectedOperationForDisplay ? readableOperationLabel(selectedOperationForDisplay) : 'Operation'}
-        subtitle={selectedOperationForDisplay ? compactOperationMeta(selectedOperationForDisplay) : undefined}
         width="wide"
-        actions={
-          selectedNumero ? (
-            <Button
-              tone="danger"
-              onClick={() => {
-                const numeroToDelete = selectedNumero
-                if (numeroToDelete && window.confirm(`Supprimer l operation ${numeroToDelete} ?`)) {
-                  void deleteMutation.mutateAsync(numeroToDelete)
-                }
-              }}
-            >
-              <Trash2 size={16} />
-              Supprimer
-            </Button>
-          ) : null
-        }
+        navigator={{
+          label: `Opération ${selectedOperationPosition || 0}/${filteredOperations.length}`,
+          title: selectedOperationTitle,
+          previousDisabled: selectedOperationIndex <= 0,
+          nextDisabled: selectedOperationIndex < 0 || selectedOperationIndex >= filteredOperations.length - 1,
+          onPrevious: () => {
+            const operation = filteredOperations[selectedOperationIndex - 1]
+            if (!operation) {
+              return
+            }
+
+            setLineBudgetCents(operation.montantEnCentimes)
+            setSelectedNumero(operation.numero)
+            setExpandedLineIndex(null)
+            setLineCreateOpen(false)
+          },
+          onNext: () => {
+            const operation = filteredOperations[selectedOperationIndex + 1]
+            if (!operation) {
+              return
+            }
+
+            setLineBudgetCents(operation.montantEnCentimes)
+            setSelectedNumero(operation.numero)
+            setExpandedLineIndex(null)
+            setLineCreateOpen(false)
+          },
+        }}
       >
         {!selectedNumero ? null : detailQuery.isLoading ? (
           <LoadingState label="Chargement du detail..." />
@@ -3039,7 +3825,7 @@ export function OperationsPage() {
                 <div className="field-action-row">
                   <select {...editForm.register('identifiantCompteDepense')}>
                     <option value="">Choisir</option>
-                    {allAccounts.map((account) => (
+                    {editDepenseOptions.map((account) => (
                       <option key={account.identifiant} value={account.identifiant}>
                         {accountChoiceLabel(account)}
                       </option>
@@ -3060,7 +3846,7 @@ export function OperationsPage() {
                 <div className="field-action-row">
                   <select {...editForm.register('identifiantCompteRecette')}>
                     <option value="">Choisir</option>
-                    {allAccounts.map((account) => (
+                    {editRecetteOptions.map((account) => (
                       <option key={account.identifiant} value={account.identifiant}>
                         {accountChoiceLabel(account)}
                       </option>
@@ -3093,9 +3879,9 @@ export function OperationsPage() {
                 <span>Date</span>
                 <input type="date" {...editForm.register('dateValeur')} />
               </div>
-              <div className="operation-overview-card compact preview-tip" data-tooltip={previewTip('Numero', editNumero || detailQuery.data.numero)}>
-                <span>Numero</span>
-                <input {...editForm.register('numero')} />
+              <div className="operation-overview-card compact preview-tip" data-tooltip={previewTip('Date de comptabilisation', detailAccountingDate ? formatDate(detailAccountingDate) : 'Aucune')}>
+                <span>Date compta</span>
+                <strong>{detailAccountingDate ? formatDate(detailAccountingDate) : 'Aucune'}</strong>
               </div>
               <div className="operation-overview-card compact wide preview-tip" data-tooltip={previewTip('Libelle', editLibelle || 'Aucun')}>
                 <span>Libelle</span>
@@ -3127,57 +3913,13 @@ export function OperationsPage() {
               ) : null}
             </div>
 
-            {editForm.formState.isDirty ? (
-              <div className="button-row operation-edit-actions">
-                <Button
-                  type="button"
-                  tone="ghost"
-                  disabled={updateMutation.isPending}
-                  onClick={() => {
-                    if (!detailQuery.data) {
-                      return
-                    }
-
-                    const mappedLines = detailQuery.data.lignes.map((line, index) => ({
-                      numeroLigne: line.numeroLigne,
-                      libelle: line.libelle ?? '',
-                      dateComptabilisation: line.dateComptabilisation ?? detailQuery.data.dateValeur,
-                      montant: toMoneyInput(line.montantEnCentimes),
-                      nomSousCategorie: subCategoryNameForLine(line),
-                      nomsBeneficiaires: beneficiariesForLine(detailQuery.data, index),
-                    }))
-
-                    editForm.reset({
-                      numero: detailQuery.data.numero,
-                      libelle: detailQuery.data.libelle ?? '',
-                      codeTypeOperation: operationTypeCode(detailQuery.data),
-                      dateValeur: detailQuery.data.dateValeur,
-                      montant: toMoneyInput(detailQuery.data.montantEnCentimes),
-                      identifiantCompteDepense: depenseId(detailQuery.data),
-                      identifiantCompteRecette: recetteId(detailQuery.data),
-                      pointee: detailQuery.data.pointee,
-                      lignes: mappedLines,
-                    })
-                    setDetailLineBaselines(mappedLines.map((line) => normalizeOperationLineValues(line)))
-                    setExpandedLineIndex(null)
-                  }}
-                >
-                  Annuler
-                </Button>
-                <Button type="submit" disabled={updateMutation.isPending || hasDetailLineOverflow || detailLineTotalMismatch || hasDetailLineDrafts}>
-                  <Save size={16} />
-                  Modifier
-                </Button>
-              </div>
-            ) : null}
-
-            <div className="page-stack">
+            <div className="page-stack operation-lines-section">
               <SectionHeader
                 title="Lignes"
                 aside={
                   <Button type="button" tone="ghost" disabled={hasDetailLineOverflow} onClick={openLineCreatePanel}>
                     <Plus size={16} />
-                    Ajouter
+                    Ajouter ligne
                   </Button>
                 }
               />
@@ -3206,14 +3948,7 @@ export function OperationsPage() {
                     const lineDirty = lineIsDirty(index)
                     const lineAmountError = detailLineErrors[index]
                     const isOpen = expandedLineIndex === index
-                    const lineTitle = currentLine?.libelle?.trim() || (isPrimaryLine ? 'Ligne 0' : `Ligne ${field.numeroLigne ?? index}`)
-                    const lineMeta = [
-                      currentLine?.dateComptabilisation ? formatDate(currentLine.dateComptabilisation) : null,
-                      formatCurrencyFromCents(isPrimaryLine ? detailPrimaryRemainingCents : parseMoneyToCents(currentLine?.montant ?? '')),
-                      currentLine?.nomSousCategorie?.trim() || null,
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')
+                    const lineTitle = lineDisplayTitle(index, isPrimaryLine ? 0 : field.numeroLigne)
 
                     return (
                       <div
@@ -3227,14 +3962,29 @@ export function OperationsPage() {
                             <button type="button" className="line-editor-toggle" onClick={() => toggleDetailLine(index)}>
                               <div className="line-editor-copy">
                                 <strong>{lineTitle}</strong>
-                                <span>{lineMeta || 'Aucun detail pour le moment'}</span>
                               </div>
                               <ChevronDown size={16} />
                             </button>
 
                             <div className="line-editor-actions">
                               {currentLine?.nomSousCategorie ? <Badge>{currentLine.nomSousCategorie}</Badge> : null}
-                              {currentBenefs.length ? <Badge>{`${currentBenefs.length} beneficiaire${currentBenefs.length > 1 ? 's' : ''}`}</Badge> : null}
+                              {currentBenefs.length ? <Badge>{beneficiarySelectionLabel(currentBenefs)}</Badge> : null}
+                              {!isPrimaryLine ? (
+                                <Button
+                                  type="button"
+                                  tone="danger"
+                                  className="line-editor-delete-button"
+                                  disabled={updateMutation.isPending}
+                                  onClick={() => {
+                                    const nextLines = editForm.getValues('lignes').filter((_, lineIndex) => lineIndex !== index)
+                                    applyDetailLineCollection(nextLines)
+                                    setExpandedLineIndex(null)
+                                  }}
+                                >
+                                  <Trash2 size={16} />
+                                  Supprimer
+                                </Button>
+                              ) : null}
                             </div>
                           </div>
 
@@ -3242,7 +3992,7 @@ export function OperationsPage() {
                             <div className="line-editor-body">
                               <div className="section-header">
                                 <div>
-                                  <h2>{isPrimaryLine ? 'Ligne 0' : `Ligne ${field.numeroLigne ?? index}`}</h2>
+                                  <h2>{lineTitle}</h2>
                                   {currentLine?.nomSousCategorie || currentBenefs.length ? (
                                     <div className="pill-list">
                                       {currentLine?.nomSousCategorie ? <Badge>{currentLine.nomSousCategorie}</Badge> : null}
@@ -3252,21 +4002,6 @@ export function OperationsPage() {
                                     </div>
                                   ) : null}
                                 </div>
-                                {!isPrimaryLine ? (
-                                  <Button
-                                    type="button"
-                                    tone="danger"
-                                    disabled={updateMutation.isPending}
-                                    onClick={() => {
-                                      const nextLines = editForm.getValues('lignes').filter((_, lineIndex) => lineIndex !== index)
-                                      applyDetailLineCollection(nextLines)
-                                      setExpandedLineIndex(null)
-                                    }}
-                                  >
-                                    <Trash2 size={16} />
-                                    Retirer
-                                  </Button>
-                                ) : null}
                               </div>
 
                               <div className="form-grid three-columns">
@@ -3304,46 +4039,14 @@ export function OperationsPage() {
                                   </button>
                                 </FormField>
 
-                                <div className="form-field full-span">
-                                  <span className="form-field-label">Beneficiaires</span>
-                                  <div className="checkbox-grid">
-                                    <QuickAddButton
-                                      label="Creer un nouveau beneficiaire"
-                                      onClick={() =>
-                                        openQuickReferenceDialog({
-                                          resource: 'beneficiaire',
-                                          title: 'Nouveau beneficiaire',
-                                          onCreated: (name) => {
-                                            editForm.setValue(`lignes.${index}.nomsBeneficiaires`, appendUnique(editForm.getValues(`lignes.${index}.nomsBeneficiaires`), name), {
-                                              shouldDirty: true,
-                                              shouldTouch: true,
-                                            })
-                                          },
-                                        })
-                                      }
-                                    />
-                                    {(beneficiairesQuery.data ?? []).map((item) => {
-                                      const checked = currentBenefs.includes(item.nom)
-                                      return (
-                                        <label key={item.nom} className={cx('toggle-chip', checked && 'checked')}>
-                                          <input
-                                            type="checkbox"
-                                            checked={checked}
-                                            onChange={() => {
-                                              const current = editForm.getValues(`lignes.${index}.nomsBeneficiaires`)
-                                              editForm.setValue(
-                                                `lignes.${index}.nomsBeneficiaires`,
-                                                checked ? current.filter((value) => value !== item.nom) : [...current, item.nom],
-                                                { shouldDirty: true, shouldTouch: true },
-                                              )
-                                            }}
-                                          />
-                                          <span>{item.nom}</span>
-                                        </label>
-                                      )
-                                    })}
-                                  </div>
-                                </div>
+                                <FormField label="Beneficiaires">
+                                  <button type="button" className="picker-field" onClick={() => openBeneficiaryPicker({ kind: 'line', index })}>
+                                    <div className="picker-field-content">
+                                      <strong>{beneficiarySelectionLabel(currentBenefs)}</strong>
+                                    </div>
+                                    <ChevronDown size={16} />
+                                  </button>
+                                </FormField>
                               </div>
 
                               {lineDirty ? (
@@ -3373,6 +4076,70 @@ export function OperationsPage() {
                   })}
                 </div>
               )}
+            </div>
+
+            <div className="detail-footer-actions">
+              <div className="detail-footer-primary">
+                {editForm.formState.isDirty ? (
+                  <>
+                    <Button
+                      type="button"
+                      tone="ghost"
+                      disabled={updateMutation.isPending}
+                      onClick={() => {
+                        if (!detailQuery.data) {
+                          return
+                        }
+
+                        const mappedLines = detailQuery.data.lignes.map((line, index) => ({
+                          numeroLigne: line.numeroLigne,
+                          libelle: line.libelle ?? '',
+                          dateComptabilisation: line.dateComptabilisation ?? detailQuery.data.dateValeur,
+                          montant: toMoneyInput(line.montantEnCentimes),
+                          nomSousCategorie: subCategoryNameForLine(line),
+                          nomsBeneficiaires: beneficiariesForLine(detailQuery.data, index),
+                        }))
+
+                        editForm.reset({
+                          numero: detailQuery.data.numero,
+                          libelle: detailQuery.data.libelle ?? '',
+                          codeTypeOperation: operationTypeCode(detailQuery.data),
+                          dateValeur: detailQuery.data.dateValeur,
+                          montant: toMoneyInput(detailQuery.data.montantEnCentimes),
+                          identifiantCompteDepense: depenseId(detailQuery.data),
+                          identifiantCompteRecette: recetteId(detailQuery.data),
+                          pointee: detailQuery.data.pointee,
+                          lignes: mappedLines,
+                        })
+                        setDetailLineBaselines(mappedLines.map((line) => normalizeOperationLineValues(line)))
+                        setExpandedLineIndex(null)
+                      }}
+                    >
+                      Annuler
+                    </Button>
+                    <Button type="submit" disabled={updateMutation.isPending || hasDetailLineOverflow || detailLineTotalMismatch || hasDetailLineDrafts}>
+                      <Save size={16} />
+                      Modifier
+                    </Button>
+                  </>
+                ) : null}
+              </div>
+              <Button
+                type="button"
+                tone="danger"
+                className="detail-delete-button"
+                disabled={deleteMutation.isPending}
+                onClick={() => {
+                  const numeroToDelete = selectedNumero
+                  const labelToDelete = selectedOperationTitle
+                  if (numeroToDelete && window.confirm(`Supprimer ${labelToDelete} ?`)) {
+                    void deleteMutation.mutateAsync(numeroToDelete)
+                  }
+                }}
+              >
+                <Trash2 size={16} />
+                Supprimer
+              </Button>
             </div>
           </form>
         )}

@@ -1,5 +1,5 @@
 import { useQueries } from '@tanstack/react-query'
-import { ArrowRight, Database, PiggyBank, Plus, ReceiptText } from 'lucide-react'
+import { ArrowRight, Database, HardDrive, PiggyBank, Plus, ReceiptText } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 
 import { Button, EmptyState, ErrorState, LoadingState, StatCard, Surface } from '../components/ui'
@@ -20,6 +20,12 @@ const cards = [
     icon: Database,
   },
   {
+    title: 'Donnees back',
+    description: 'Budgets, emprunts, comptes techniques, evaluations et administration.',
+    to: '/donnees',
+    icon: HardDrive,
+  },
+  {
     title: 'Analyse',
     description: 'Releves et syntheses.',
     to: '/analyse',
@@ -29,7 +35,7 @@ const cards = [
 
 export function DashboardPage() {
   const navigate = useNavigate()
-  const [banques, titulaires, beneficiaires, categories, internalAccounts, operations] = useQueries({
+  const [banques, titulaires, beneficiaires, categories, internalAccounts, operations, technicalAccounts, loans, evaluations] = useQueries({
     queries: [
       { queryKey: ['references', 'banque'], queryFn: () => monatisApi.listReferences('banque') },
       { queryKey: ['references', 'titulaire'], queryFn: () => monatisApi.listReferences('titulaire') },
@@ -37,11 +43,15 @@ export function DashboardPage() {
       { queryKey: ['references', 'categorie'], queryFn: () => monatisApi.listReferences('categorie') },
       { queryKey: ['comptes', 'internes'], queryFn: () => monatisApi.listInternalAccounts() },
       { queryKey: ['operations'], queryFn: () => monatisApi.listOperations() },
+      { queryKey: ['comptes', 'techniques'], queryFn: () => monatisApi.listTechnicalAccounts() },
+      { queryKey: ['emprunts'], queryFn: () => monatisApi.listLoans() },
+      { queryKey: ['evaluations'], queryFn: () => monatisApi.listEvaluations() },
     ],
   })
 
-  const hasError = [banques, titulaires, beneficiaires, categories, internalAccounts, operations].find((query) => query.error)
-  const isLoading = [banques, titulaires, beneficiaires, categories, internalAccounts, operations].some((query) => query.isLoading)
+  const dashboardQueries = [banques, titulaires, beneficiaires, categories, internalAccounts, operations, technicalAccounts, loans, evaluations]
+  const hasError = dashboardQueries.find((query) => query.error)
+  const isLoading = dashboardQueries.some((query) => query.isLoading)
 
   return (
     <div className="page-stack">
@@ -69,11 +79,16 @@ export function DashboardPage() {
             />
             <StatCard
               title="Comptes"
-              value={compactNumber(internalAccounts.data?.length ?? 0)}
+              value={compactNumber((internalAccounts.data?.length ?? 0) + (technicalAccounts.data?.length ?? 0))}
             />
             <StatCard
               title="Operations"
               value={compactNumber(operations.data?.length ?? 0)}
+            />
+            <StatCard
+              title="Back enrichi"
+              value={compactNumber((loans.data?.length ?? 0) + (evaluations.data?.length ?? 0))}
+              hint="Emprunts et evaluations"
             />
           </div>
 

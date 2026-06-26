@@ -40,6 +40,7 @@ type QuickReferenceValues = z.infer<typeof quickReferenceSchema>
 type QuickCategoryValues = z.infer<typeof quickCategorySchema>
 type QuickInternalAccountValues = z.infer<typeof quickInternalAccountSchema>
 type QuickExternalAccountValues = z.infer<typeof quickExternalAccountSchema>
+export type QuickAccountKind = 'interne' | 'externe' | 'technique'
 
 export interface QuickReferenceDialogState {
   resource: ReferenceResource
@@ -52,8 +53,9 @@ export interface QuickReferenceDialogState {
 export interface QuickAccountDialogState {
   title: string
   overlayClassName?: string
-  initialKind?: 'interne' | 'externe'
-  allowedKinds?: Array<'interne' | 'externe'>
+  initialKind?: QuickAccountKind
+  initialInternalType?: string
+  allowedKinds?: QuickAccountKind[]
   onCreated?: (identifiant: string) => void
 }
 
@@ -323,9 +325,9 @@ function QuickAccountOverlayContent({
   onClose: () => void
 }) {
   const queryClient = useQueryClient()
-  const allowedKinds: Array<'interne' | 'externe'> = dialog.allowedKinds?.length ? dialog.allowedKinds : ['interne', 'externe']
-  const defaultKind: 'interne' | 'externe' = allowedKinds.includes(dialog.initialKind ?? 'interne') ? (dialog.initialKind ?? 'interne') : allowedKinds[0]
-  const [kind, setKind] = useState<'interne' | 'externe'>(defaultKind)
+  const allowedKinds: QuickAccountKind[] = dialog.allowedKinds?.length ? dialog.allowedKinds : ['interne', 'externe', 'technique']
+  const defaultKind: QuickAccountKind = allowedKinds.includes(dialog.initialKind ?? 'interne') ? (dialog.initialKind ?? 'interne') : allowedKinds[0]
+  const [kind, setKind] = useState<QuickAccountKind>(defaultKind)
   const [quickReferenceDialog, setQuickReferenceDialog] = useState<QuickReferenceDialogState | null>(null)
 
   const internalForm = useForm<QuickInternalAccountValues>({
@@ -333,7 +335,7 @@ function QuickAccountOverlayContent({
     defaultValues: {
       identifiant: '',
       libelle: '',
-      codeTypeFonctionnement: '',
+      codeTypeFonctionnement: dialog.initialInternalType ?? '',
       nomBanque: '',
       dateSoldeInitial: todayIso(),
       montantSoldeInitial: '',
@@ -342,6 +344,14 @@ function QuickAccountOverlayContent({
   })
 
   const externalForm = useForm<QuickExternalAccountValues>({
+    resolver: zodResolver(quickExternalAccountSchema),
+    defaultValues: {
+      identifiant: '',
+      libelle: '',
+    },
+  })
+
+  const technicalForm = useForm<QuickExternalAccountValues>({
     resolver: zodResolver(quickExternalAccountSchema),
     defaultValues: {
       identifiant: '',
@@ -403,8 +413,23 @@ function QuickAccountOverlayContent({
     },
   })
 
+  const createTechnicalMutation = useMutation({
+    mutationFn: (values: QuickExternalAccountValues) =>
+      monatisApi.createTechnicalAccount({
+        identifiant: values.identifiant.trim(),
+        libelle: nullIfBlank(values.libelle ?? ''),
+      }),
+    onSuccess: async (response) => {
+      await queryClient.invalidateQueries({ queryKey: ['comptes'] })
+      await queryClient.invalidateQueries({ queryKey: ['operations', 'compat'] })
+      dialog?.onCreated?.(response.identifiant)
+      onClose()
+    },
+  })
+
   const internalError = createInternalMutation.error ? apiErrorMessage(createInternalMutation.error) : ''
   const externalError = createExternalMutation.error ? apiErrorMessage(createExternalMutation.error) : ''
+  const technicalError = createTechnicalMutation.error ? apiErrorMessage(createTechnicalMutation.error) : ''
 
   return (
     <>
@@ -412,12 +437,21 @@ function QuickAccountOverlayContent({
         <div className="page-stack">
           {allowedKinds.length > 1 ? (
             <div className="inline-segmented">
-              <button type="button" className={cx('inline-segmented-option', kind === 'interne' && 'active')} onClick={() => setKind('interne')}>
-                Interne
-              </button>
-              <button type="button" className={cx('inline-segmented-option', kind === 'externe' && 'active')} onClick={() => setKind('externe')}>
-                Externe
-              </button>
+              {allowedKinds.includes('interne') ? (
+                <button type="button" className={cx('inline-segmented-option', kind === 'interne' && 'active')} onClick={() => setKind('interne')}>
+                  Interne
+                </button>
+              ) : null}
+              {allowedKinds.includes('externe') ? (
+                <button type="button" className={cx('inline-segmented-option', kind === 'externe' && 'active')} onClick={() => setKind('externe')}>
+                  Externe
+                </button>
+              ) : null}
+              {allowedKinds.includes('technique') ? (
+                <button type="button" className={cx('inline-segmented-option', kind === 'technique' && 'active')} onClick={() => setKind('technique')}>
+                  Technique
+                </button>
+              ) : null}
             </div>
           ) : null}
 
@@ -528,7 +562,7 @@ function QuickAccountOverlayContent({
                 </Button>
               </div>
             </form>
-          ) : (
+          ) : kind === 'externe' ? (
             <form
               className="form-grid"
               onSubmit={externalForm.handleSubmit(async (values) => {
@@ -547,6 +581,30 @@ function QuickAccountOverlayContent({
 
               <div className="button-row">
                 <Button type="submit" disabled={createExternalMutation.isPending}>
+                  <Save size={16} />
+                  Enregistrer
+                </Button>
+              </div>
+            </form>
+          ) : (
+            <form
+              className="form-grid"
+              onSubmit={technicalForm.handleSubmit(async (values) => {
+                await createTechnicalMutation.mutateAsync(values)
+              })}
+            >
+              <FormField label="Identifiant" error={technicalForm.formState.errors.identifiant?.message}>
+                <input {...technicalForm.register('identifiant')} placeholder="TECH-FRAIS" />
+              </FormField>
+
+              <FormField label="Libelle">
+                <textarea {...technicalForm.register('libelle')} rows={4} placeholder="Facultatif" />
+              </FormField>
+
+              {technicalError ? <small className="form-field-error">{technicalError}</small> : null}
+
+              <div className="button-row">
+                <Button type="submit" disabled={createTechnicalMutation.isPending}>
                   <Save size={16} />
                   Enregistrer
                 </Button>

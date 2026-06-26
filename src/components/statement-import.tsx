@@ -38,6 +38,7 @@ type DuplicateHoverTooltip = { text: string; x: number; y: number }
 
 const DEFAULT_DRAFT_PAGE_SIZE = 50
 const DRAFT_PAGE_SIZE_OPTIONS = [25, 50, 100, 200]
+const HIDDEN_IMPORT_OPERATION_TYPES = new Set(['INVEST', 'LIQUID'])
 
 interface ImportDraft {
   id: string
@@ -134,6 +135,10 @@ function accountChoiceLabel(account: CompteSummary): string {
   return `${account.identifiant}${account.libelle ? ` - ${account.libelle}` : ''}`
 }
 
+function internalAccountsByType(internalAccounts: CompteSummary[], codeTypeFonctionnement: string): CompteSummary[] {
+  return internalAccounts.filter((account) => account.codeTypeFonctionnement === codeTypeFonctionnement)
+}
+
 function normalizedLookup(value: string): string {
   return value
     .normalize('NFD')
@@ -193,9 +198,44 @@ function accountOptionsForField(
   field: AccountField,
   internalAccounts: CompteSummary[],
   externalAccounts: CompteSummary[],
+  technicalAccounts: CompteSummary[],
 ): CompteSummary[] {
-  const group = operationTypeGroup(codeTypeOperation)
+  const courantAccounts = internalAccountsByType(internalAccounts, 'COURANT')
+  const financierAccounts = internalAccountsByType(internalAccounts, 'FINANCIER')
+  const bienAccounts = internalAccountsByType(internalAccounts, 'BIEN')
 
+  switch (codeTypeOperation) {
+    case 'RECETTE':
+      return field === 'depense' ? externalAccounts : courantAccounts
+    case 'DEPENSE':
+      return field === 'depense' ? courantAccounts : externalAccounts
+    case 'TRANSFERT':
+      return courantAccounts
+    case 'DEPOT':
+    case 'INVEST':
+      return field === 'depense' ? courantAccounts : financierAccounts
+    case 'RETRAIT':
+    case 'LIQUID':
+      return field === 'depense' ? financierAccounts : courantAccounts
+    case 'ACHAT':
+      return field === 'depense' ? externalAccounts : bienAccounts
+    case 'VENTE':
+      return field === 'depense' ? bienAccounts : externalAccounts
+    case 'COURANT+':
+      return field === 'depense' ? technicalAccounts : courantAccounts
+    case 'COURANT-':
+      return field === 'depense' ? courantAccounts : technicalAccounts
+    case 'FINANCIER+':
+      return field === 'depense' ? technicalAccounts : financierAccounts
+    case 'FINANCIER-':
+      return field === 'depense' ? financierAccounts : technicalAccounts
+    case 'BIEN+':
+      return field === 'depense' ? technicalAccounts : bienAccounts
+    case 'BIEN-':
+      return field === 'depense' ? bienAccounts : technicalAccounts
+  }
+
+  const group = operationTypeGroup(codeTypeOperation)
   if (group === 'incoming') {
     return field === 'depense' ? externalAccounts : internalAccounts
   }
@@ -208,7 +248,7 @@ function accountOptionsForField(
     return internalAccounts
   }
 
-  return [...internalAccounts, ...externalAccounts]
+  return [...internalAccounts, ...externalAccounts, ...technicalAccounts]
 }
 
 function accountOptionsWithCurrent(options: CompteSummary[], currentIdentifiant: string, allAccounts: CompteSummary[]): CompteSummary[] {
@@ -570,6 +610,12 @@ export function StatementImportOverlay({
     enabled: open,
   })
 
+  const technicalAccountsQuery = useQuery({
+    queryKey: ['comptes', 'techniques'],
+    queryFn: () => monatisApi.listTechnicalAccounts(),
+    enabled: open,
+  })
+
   const sousCategoriesQuery = useQuery({
     queryKey: ['references', 'souscategorie'],
     queryFn: () => monatisApi.listReferences('souscategorie'),
@@ -584,6 +630,11 @@ export function StatementImportOverlay({
 
   const internalAccounts = useMemo(() => internalAccountsQuery.data ?? [], [internalAccountsQuery.data])
   const externalAccounts = useMemo(() => externalAccountsQuery.data ?? [], [externalAccountsQuery.data])
+  const technicalAccounts = useMemo(() => technicalAccountsQuery.data ?? [], [technicalAccountsQuery.data])
+  const selectableOperationTypes = useMemo(
+    () => (typesQuery.data ?? []).filter((type) => !HIDDEN_IMPORT_OPERATION_TYPES.has(type.code)),
+    [typesQuery.data],
+  )
   const duplicatePreviewDraft = duplicatePreviewDraftId ? drafts.find((draft) => draft.id === duplicatePreviewDraftId) ?? null : null
   const duplicateExistingOperationQuery = useQuery({
     queryKey: ['operation', 'duplicate-preview', duplicatePreviewDraft?.duplicateOperationNumero],
@@ -856,7 +907,7 @@ export function StatementImportOverlay({
       return true
     }
 
-    const allAccounts = [...internalAccounts, ...externalAccounts]
+    const allAccounts = [...internalAccounts, ...externalAccounts, ...technicalAccounts]
     const depenseAccount = findAccountByIdOrIdentifier(allAccounts, null, draft.identifiantCompteDepense)
     const recetteAccount = findAccountByIdOrIdentifier(allAccounts, null, draft.identifiantCompteRecette)
     const operationType = (typesQuery.data ?? []).find((type) => type.code === draft.codeTypeOperation)
@@ -899,6 +950,32 @@ export function StatementImportOverlay({
         .join(' '),
     ).includes(draftSearchNeedle)
   }
+
+  function accountCanUseType(identifiant: string, codeTypeOperation: string, field?: AccountField): boolean {
+    if (!codeTypeOperation || HIDDEN_IMPORT_OPERATION_TYPES.has(codeTypeOperation)) {
+      return false
+    }
+
+    if (!identifiant) {
+      return true
+    }
+
+    const roles: AccountField[] = field ? [field] : ['depense', 'recette']
+    return roles.some((role) =>
+      accountOptionsForField(codeTypeOperation, role, internalAccounts, externalAccounts, technicalAccounts).some((account) => account.identifiant === identifiant),
+    )
+  }
+
+  function typeOptionsForDraft(draft: ImportDraft) {
+    const contextAccountId = statementAccountIdentifier(draft) || statementAccountId
+
+    if (!contextAccountId) {
+      return selectableOperationTypes
+    }
+
+    return selectableOperationTypes.filter((type) => accountCanUseType(contextAccountId, type.code))
+  }
+
   const filteredDrafts = drafts.filter((draft) => {
     let matchesFilter = activeFilter === 'all'
 
@@ -1159,13 +1236,36 @@ export function StatementImportOverlay({
   }
 
   function updateDraftType(draft: ImportDraft, codeTypeOperation: string) {
-    const depenseOptions = accountOptionsForField(codeTypeOperation, 'depense', internalAccounts, externalAccounts)
-    const recetteOptions = accountOptionsForField(codeTypeOperation, 'recette', internalAccounts, externalAccounts)
+    const depenseOptions = accountOptionsForField(codeTypeOperation, 'depense', internalAccounts, externalAccounts, technicalAccounts)
+    const recetteOptions = accountOptionsForField(codeTypeOperation, 'recette', internalAccounts, externalAccounts, technicalAccounts)
+    const currentStatementAccountId = statementAccountIdentifier(draft) || statementAccountId
+    const canUseStatementAsDepense = depenseOptions.some((account) => account.identifiant === currentStatementAccountId)
+    const canUseStatementAsRecette = recetteOptions.some((account) => account.identifiant === currentStatementAccountId)
+    let statementAccountRole = draft.statementAccountRole
+    let counterpartyAccountRole = draft.counterpartyAccountRole
+    let identifiantCompteDepense = depenseOptions.some((account) => account.identifiant === draft.identifiantCompteDepense) ? draft.identifiantCompteDepense : ''
+    let identifiantCompteRecette = recetteOptions.some((account) => account.identifiant === draft.identifiantCompteRecette) ? draft.identifiantCompteRecette : ''
+
+    if (currentStatementAccountId && (canUseStatementAsDepense || canUseStatementAsRecette)) {
+      if (canUseStatementAsDepense && (!canUseStatementAsRecette || draft.statementAccountRole === 'depense')) {
+        statementAccountRole = 'depense'
+        counterpartyAccountRole = 'recette'
+        identifiantCompteDepense = currentStatementAccountId
+        identifiantCompteRecette = recetteOptions.some((account) => account.identifiant === draft.identifiantCompteRecette) ? draft.identifiantCompteRecette : ''
+      } else {
+        statementAccountRole = 'recette'
+        counterpartyAccountRole = 'depense'
+        identifiantCompteRecette = currentStatementAccountId
+        identifiantCompteDepense = depenseOptions.some((account) => account.identifiant === draft.identifiantCompteDepense) ? draft.identifiantCompteDepense : ''
+      }
+    }
 
     updateDraft(draft.id, {
       codeTypeOperation,
-      identifiantCompteDepense: depenseOptions.some((account) => account.identifiant === draft.identifiantCompteDepense) ? draft.identifiantCompteDepense : '',
-      identifiantCompteRecette: recetteOptions.some((account) => account.identifiant === draft.identifiantCompteRecette) ? draft.identifiantCompteRecette : '',
+      statementAccountRole,
+      counterpartyAccountRole,
+      identifiantCompteDepense,
+      identifiantCompteRecette,
     })
   }
 
@@ -1237,8 +1337,8 @@ export function StatementImportOverlay({
         return draft
       }
 
-      const depenseOptions = accountOptionsForField(codeTypeOperation, 'depense', internalAccounts, externalAccounts)
-      const recetteOptions = accountOptionsForField(codeTypeOperation, 'recette', internalAccounts, externalAccounts)
+      const depenseOptions = accountOptionsForField(codeTypeOperation, 'depense', internalAccounts, externalAccounts, technicalAccounts)
+      const recetteOptions = accountOptionsForField(codeTypeOperation, 'recette', internalAccounts, externalAccounts, technicalAccounts)
 
       return {
         ...draft,
@@ -1572,14 +1672,14 @@ export function StatementImportOverlay({
   }
 
   function renderDuplicateImportDraftDetails(draft: ImportDraft, title: string) {
-    const allAccounts = [...internalAccounts, ...externalAccounts]
+    const allAccounts = [...internalAccounts, ...externalAccounts, ...technicalAccounts]
     const depenseOptions = accountOptionsWithCurrent(
-      accountOptionsForField(draft.codeTypeOperation, 'depense', internalAccounts, externalAccounts),
+      accountOptionsForField(draft.codeTypeOperation, 'depense', internalAccounts, externalAccounts, technicalAccounts),
       draft.identifiantCompteDepense,
       allAccounts,
     )
     const recetteOptions = accountOptionsWithCurrent(
-      accountOptionsForField(draft.codeTypeOperation, 'recette', internalAccounts, externalAccounts),
+      accountOptionsForField(draft.codeTypeOperation, 'recette', internalAccounts, externalAccounts, technicalAccounts),
       draft.identifiantCompteRecette,
       allAccounts,
     )
@@ -1618,7 +1718,7 @@ export function StatementImportOverlay({
           <FormField label="Type">
             <select value={draft.codeTypeOperation} onChange={(event) => updateDraftType(draft, event.target.value)}>
               <option value="">Choisir</option>
-              {(typesQuery.data ?? []).map((type) => (
+              {typeOptionsForDraft(draft).map((type) => (
                 <option key={type.code} value={type.code}>
                   {type.libelleCourt}
                 </option>
@@ -1926,7 +2026,7 @@ export function StatementImportOverlay({
       return (
         <select value={draft.codeTypeOperation} onChange={(event) => updateDraftType(draft, event.target.value)} aria-label="Corriger le type">
           <option value="">Choisir un type</option>
-          {(typesQuery.data ?? []).map((type) => (
+          {typeOptionsForDraft(draft).map((type) => (
             <option key={type.code} value={type.code}>
               {type.libelleCourt}
             </option>
@@ -1969,13 +2069,13 @@ export function StatementImportOverlay({
   }
 
   function renderCorrectionStep(draft: ImportDraft, step: CorrectionStep) {
-    const allAccounts = [...internalAccounts, ...externalAccounts]
+    const allAccounts = [...internalAccounts, ...externalAccounts, ...technicalAccounts]
 
     if (step.kind === 'codeTypeOperation') {
       return (
         <div className="statement-import-choice-grid">
           {!(typesQuery.data ?? []).length ? <div className="statement-import-existing-operation">Aucun type d'operation charge.</div> : null}
-          {(typesQuery.data ?? []).map((type) => (
+          {typeOptionsForDraft(draft).map((type) => (
             <button key={type.code} type="button" className="statement-import-choice" onClick={() => applyCorrectionPatch(draft.id, { codeTypeOperation: type.code })}>
               <strong>{type.libelleCourt}</strong>
               <span>{type.code}</span>
@@ -1987,7 +2087,11 @@ export function StatementImportOverlay({
 
     if (step.kind === 'identifiantCompteDepense' || step.kind === 'identifiantCompteRecette') {
       const field = step.kind === 'identifiantCompteDepense' ? 'depense' : 'recette'
-      const options = accountOptionsWithCurrent(accountOptionsForField(draft.codeTypeOperation, field, internalAccounts, externalAccounts), field === 'depense' ? draft.identifiantCompteDepense : draft.identifiantCompteRecette, allAccounts)
+      const options = accountOptionsWithCurrent(
+        accountOptionsForField(draft.codeTypeOperation, field, internalAccounts, externalAccounts, technicalAccounts),
+        field === 'depense' ? draft.identifiantCompteDepense : draft.identifiantCompteRecette,
+        allAccounts,
+      )
       const label = field === 'depense' ? 'Compte depense' : 'Compte recette'
 
       return (
@@ -2056,10 +2160,11 @@ export function StatementImportOverlay({
     typesQuery.isLoading ||
     internalAccountsQuery.isLoading ||
     externalAccountsQuery.isLoading ||
+    technicalAccountsQuery.isLoading ||
     sousCategoriesQuery.isLoading ||
     beneficiairesQuery.isLoading
   const referenceError =
-    typesQuery.error || internalAccountsQuery.error || externalAccountsQuery.error || sousCategoriesQuery.error || beneficiairesQuery.error
+    typesQuery.error || internalAccountsQuery.error || externalAccountsQuery.error || technicalAccountsQuery.error || sousCategoriesQuery.error || beneficiairesQuery.error
   const allImported = Boolean(drafts.length) && drafts.every((draft) => draft.status === 'imported')
 
   useEffect(() => {
@@ -2229,19 +2334,19 @@ export function StatementImportOverlay({
     currentCorrectionStep?.kind === 'identifiantCompteDepense' || currentCorrectionStep?.kind === 'identifiantCompteRecette'
 
   function renderSimilarGroupOperation(draft: ImportDraft, options?: { correctionMode?: boolean }) {
-    const allAccounts = [...internalAccounts, ...externalAccounts]
+    const allAccounts = [...internalAccounts, ...externalAccounts, ...technicalAccounts]
     const depenseOptions = accountOptionsWithCurrent(
-      accountOptionsForField(draft.codeTypeOperation, 'depense', internalAccounts, externalAccounts),
+      accountOptionsForField(draft.codeTypeOperation, 'depense', internalAccounts, externalAccounts, technicalAccounts),
       draft.identifiantCompteDepense,
       allAccounts,
     )
     const recetteOptions = accountOptionsWithCurrent(
-      accountOptionsForField(draft.codeTypeOperation, 'recette', internalAccounts, externalAccounts),
+      accountOptionsForField(draft.codeTypeOperation, 'recette', internalAccounts, externalAccounts, technicalAccounts),
       draft.identifiantCompteRecette,
       allAccounts,
     )
     const counterpartyOptions = accountOptionsWithCurrent(
-      accountOptionsForField(draft.codeTypeOperation, draft.counterpartyAccountRole, internalAccounts, externalAccounts),
+      accountOptionsForField(draft.codeTypeOperation, draft.counterpartyAccountRole, internalAccounts, externalAccounts, technicalAccounts),
       counterpartyAccountIdentifier(draft),
       allAccounts,
     )
@@ -2313,7 +2418,7 @@ export function StatementImportOverlay({
                 <span>Type</span>
                 <select value={draft.codeTypeOperation} onChange={(event) => updateDraftType(draft, event.target.value)}>
                   <option value="">Type</option>
-                  {(typesQuery.data ?? []).map((type) => (
+                  {typeOptionsForDraft(draft).map((type) => (
                     <option key={type.code} value={type.code}>
                       {type.libelleCourt}
                     </option>
@@ -2371,7 +2476,7 @@ export function StatementImportOverlay({
               <FormField label="Type">
                 <select value={draft.codeTypeOperation} onChange={(event) => updateDraftType(draft, event.target.value)}>
                   <option value="">Choisir</option>
-                  {(typesQuery.data ?? []).map((type) => (
+                  {typeOptionsForDraft(draft).map((type) => (
                     <option key={type.code} value={type.code}>
                       {type.libelleCourt}
                     </option>
@@ -2873,7 +2978,7 @@ export function StatementImportOverlay({
                             aria-label={`Type pour ${group.label}`}
                           >
                             <option value="">{group.mixedTypes ? 'Types differents' : 'Type'}</option>
-                            {(typesQuery.data ?? []).map((type) => (
+                            {selectableOperationTypes.filter((type) => accountCanUseType(statementAccountId, type.code)).map((type) => (
                               <option key={type.code} value={type.code}>
                                 {type.libelleCourt}
                               </option>
@@ -2923,19 +3028,19 @@ export function StatementImportOverlay({
 
             <div className="statement-import-list">
               {visibleFilteredDrafts.map((draft) => {
-                const allAccounts = [...internalAccounts, ...externalAccounts]
+                const allAccounts = [...internalAccounts, ...externalAccounts, ...technicalAccounts]
                 const depenseOptions = accountOptionsWithCurrent(
-                  accountOptionsForField(draft.codeTypeOperation, 'depense', internalAccounts, externalAccounts),
+                  accountOptionsForField(draft.codeTypeOperation, 'depense', internalAccounts, externalAccounts, technicalAccounts),
                   draft.identifiantCompteDepense,
                   allAccounts,
                 )
                 const recetteOptions = accountOptionsWithCurrent(
-                  accountOptionsForField(draft.codeTypeOperation, 'recette', internalAccounts, externalAccounts),
+                  accountOptionsForField(draft.codeTypeOperation, 'recette', internalAccounts, externalAccounts, technicalAccounts),
                   draft.identifiantCompteRecette,
                   allAccounts,
                 )
                 const counterpartyOptions = accountOptionsWithCurrent(
-                  accountOptionsForField(draft.codeTypeOperation, draft.counterpartyAccountRole, internalAccounts, externalAccounts),
+                  accountOptionsForField(draft.codeTypeOperation, draft.counterpartyAccountRole, internalAccounts, externalAccounts, technicalAccounts),
                   counterpartyAccountIdentifier(draft),
                   allAccounts,
                 )
@@ -3008,7 +3113,7 @@ export function StatementImportOverlay({
                             <span>Type</span>
                             <select value={draft.codeTypeOperation} onChange={(event) => updateDraftType(draft, event.target.value)}>
                               <option value="">Type</option>
-                              {(typesQuery.data ?? []).map((type) => (
+                              {typeOptionsForDraft(draft).map((type) => (
                                 <option key={type.code} value={type.code}>
                                   {type.libelleCourt}
                                 </option>
@@ -3066,7 +3171,7 @@ export function StatementImportOverlay({
                           <FormField label="Type">
                             <select value={draft.codeTypeOperation} onChange={(event) => updateDraftType(draft, event.target.value)}>
                               <option value="">Choisir</option>
-                              {(typesQuery.data ?? []).map((type) => (
+                              {typeOptionsForDraft(draft).map((type) => (
                                 <option key={type.code} value={type.code}>
                                   {type.libelleCourt}
                                 </option>

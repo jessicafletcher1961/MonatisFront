@@ -6,7 +6,9 @@ import { useForm, useWatch } from 'react-hook-form'
 import { z } from 'zod'
 
 import { QuickReferenceOverlay, type QuickReferenceDialogState } from '../components/quick-create'
-import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, QuickAddButton, Surface } from '../components/ui'
+import { DEFAULT_CATALOG_PAGE_SIZE } from '../components/pagination-constants'
+import { CatalogPaginationControls } from '../components/pagination-controls'
+import { Badge, Button, EmptyState, ErrorState, FormField, LoadingState, OverlayPanel, PageHeader, QuickAddButton, Surface } from '../components/ui'
 import { cx } from '../lib/cx'
 import { apiErrorMessage, type ReferenceDetail, type ReferenceListItem, type ReferenceResource, monatisApi } from '../lib/monatis-api'
 import { nullIfBlank } from '../lib/format'
@@ -41,8 +43,10 @@ function listHint(resource: ReferenceResource, item: ReferenceListItem): string 
       return `${item.nomsSousCategories?.length ?? 0} sous-categorie(s)`
     case 'souscategorie':
       return item.nomCategorie ? `Categorie · ${item.nomCategorie}` : 'Sans categorie'
+    case 'beneficiaire':
+      return 'Beneficiaire'
     default:
-      return item.libelle ?? 'Reference'
+      return 'Reference'
   }
 }
 
@@ -64,6 +68,23 @@ function detailSummary(resource: ReferenceResource, detail?: ReferenceDetail | n
   }
 }
 
+function navigatorLabel(resource: ReferenceResource): string {
+  switch (resource) {
+    case 'banque':
+      return 'Banque'
+    case 'titulaire':
+      return 'Titulaire'
+    case 'beneficiaire':
+      return 'Bénéficiaire'
+    case 'categorie':
+      return 'Catégorie'
+    case 'souscategorie':
+      return 'Sous-catégorie'
+    default:
+      return 'Référence'
+  }
+}
+
 export function ReferencePage({ config }: { config: ReferencePageConfig }) {
   const queryClient = useQueryClient()
   const [selectedName, setSelectedName] = useState<string | null>(null)
@@ -71,13 +92,21 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
   const [categoryPickerOpen, setCategoryPickerOpen] = useState(false)
   const [categorySearch, setCategorySearch] = useState('')
   const [search, setSearch] = useState('')
+  const [pageIndex, setPageIndex] = useState(1)
+  const [pageSize, setPageSize] = useState(DEFAULT_CATALOG_PAGE_SIZE)
   const [quickReferenceDialog, setQuickReferenceDialog] = useState<QuickReferenceDialogState | null>(null)
   const deferredSearch = useDeferredValue(search)
   const deferredCategorySearch = useDeferredValue(categorySearch)
 
   const listQuery = useQuery({
-    queryKey: ['references', config.resource],
-    queryFn: () => monatisApi.listReferences(config.resource),
+    queryKey: ['references', config.resource, 'page', pageIndex, pageSize, deferredSearch],
+    queryFn: () =>
+      monatisApi.listReferencesPage(config.resource, {
+        numeroPage: pageIndex,
+        taillePage: pageSize,
+        recherche: deferredSearch.trim() || null,
+      }),
+    placeholderData: (previousData) => previousData,
   })
 
   const categoriesQuery = useQuery({
@@ -128,20 +157,22 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
     })
   }, [detailQuery.data, form])
 
-  const filteredItems = useMemo(() => {
-    const needle = deferredSearch.trim().toLowerCase()
-    const list = listQuery.data ?? []
-
-    if (!needle) {
-      return list
-    }
-
-    return list.filter((item) =>
-      [item.nom, item.libelle, item.nomCategorie, ...(item.nomsSousCategories ?? [])]
-        .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(needle)),
-    )
-  }, [deferredSearch, listQuery.data])
+  const visibleItems = useMemo(() => listQuery.data?.references ?? [], [listQuery.data?.references])
+  const referenceTotalCount = listQuery.data?.totalReferences ?? 0
+  const referenceTotalPages = listQuery.data?.totalPages ?? 0
+  const referenceCurrentPage = listQuery.data?.numeroPage ?? pageIndex
+  const referenceFirstVisible = listQuery.data?.premierElement ?? 0
+  const referenceLastVisible = listQuery.data?.dernierElement ?? 0
+  const selectedReferenceIndex = useMemo(
+    () => (selectedName ? visibleItems.findIndex((item) => item.nom === selectedName) : -1),
+    [selectedName, visibleItems],
+  )
+  const selectedReferencePosition = selectedReferenceIndex >= 0 ? selectedReferenceIndex + 1 : 0
+  const selectedReferenceForDisplay = useMemo(
+    () => visibleItems.find((item) => item.nom === selectedName) ?? detailQuery.data ?? null,
+    [detailQuery.data, selectedName, visibleItems],
+  )
+  const selectedReferenceTitle = selectedReferenceForDisplay?.libelle?.trim() || selectedReferenceForDisplay?.nom || selectedName || config.title
 
   const filteredCategories = useMemo(() => {
     const needle = deferredCategorySearch.trim().toLowerCase()
@@ -246,41 +277,83 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
         }
       />
 
-      {listQuery.isLoading ? <LoadingState label={`Chargement des ${config.plural}...`} /> : null}
+      {listQuery.isLoading && !listQuery.data ? <LoadingState label={`Chargement des ${config.plural}...`} /> : null}
       {activeError ? <ErrorState message={apiErrorMessage(activeError)} /> : null}
 
       <Surface className="catalog-panel">
-        <FilterBar>
-          <label className="search-field">
-            <Search size={16} />
-            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`Rechercher ${config.singular.toLowerCase()}...`} />
-          </label>
-        </FilterBar>
+        <div className="operation-filter-stack">
+          <div className="operation-search-pagination-row">
+            <label className="search-field operation-history-search">
+              <Search size={16} />
+              <input
+                value={search}
+                onChange={(event) => {
+                  setSearch(event.target.value)
+                  setPageIndex(1)
+                }}
+                placeholder={`Rechercher ${config.singular.toLowerCase()}...`}
+              />
+            </label>
 
-        {!filteredItems.length ? (
+            <CatalogPaginationControls
+              ariaLabel={`Pagination des ${config.plural} haut`}
+              totalCount={referenceTotalCount}
+              firstVisible={referenceFirstVisible}
+              lastVisible={referenceLastVisible}
+              currentPage={referenceCurrentPage}
+              totalPages={referenceTotalPages}
+              pageSize={pageSize}
+              pageSizeLabel={`Nombre de ${config.plural} affichees`}
+              onPageChange={setPageIndex}
+              onPageSizeChange={(size) => {
+                setPageSize(size)
+                setPageIndex(1)
+              }}
+            />
+          </div>
+        </div>
+
+        {!visibleItems.length ? (
           <EmptyState title={`Aucune ${config.singular.toLowerCase()} visible`} description="Ajuste le filtre ou ajoute une entree." />
         ) : (
-          <div className="catalog-grid">
-            {filteredItems.map((item) => (
+          <div className="operation-history-list compact-entity-list">
+            {visibleItems.map((item) => (
               <button
                 key={item.nom}
                 type="button"
-                className={cx('catalog-card', selectedName === item.nom && 'selected')}
+                className={cx('operation-history-row compact-entity-row reference-row', selectedName === item.nom && 'selected')}
                 onClick={() => {
                   setSelectedName(item.nom)
                 }}
               >
-                <div className="catalog-card-head">
-                  <div>
-                    <strong>{item.nom}</strong>
-                    <p>{item.libelle ?? 'Sans libelle'}</p>
-                  </div>
-                  <Badge>{listHint(config.resource, item)}</Badge>
+                <div className="operation-history-main">
+                  <strong title={item.nom}>{item.nom}</strong>
+                  <span title={item.libelle ?? 'Sans libelle'}>{item.libelle ?? 'Sans libelle'}</span>
+                </div>
+                <div className="operation-history-reference" title={listHint(config.resource, item)}>
+                  {listHint(config.resource, item)}
                 </div>
               </button>
             ))}
           </div>
         )}
+
+        <CatalogPaginationControls
+          ariaLabel={`Pagination des ${config.plural} bas`}
+          totalCount={referenceTotalCount}
+          firstVisible={referenceFirstVisible}
+          lastVisible={referenceLastVisible}
+          currentPage={referenceCurrentPage}
+          totalPages={referenceTotalPages}
+          pageSize={pageSize}
+          position="bottom"
+          pageSizeLabel={`Nombre de ${config.plural} affichees`}
+          onPageChange={setPageIndex}
+          onPageSizeChange={(size) => {
+            setPageSize(size)
+            setPageIndex(1)
+          }}
+        />
       </Surface>
 
       <OverlayPanel open={createOpen} onClose={() => setCreateOpen(false)} title={`Nouvelle ${config.singular}`} width="regular">
@@ -378,24 +451,31 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
 
       <OverlayPanel
         open={Boolean(selectedName)}
-        onClose={() => setSelectedName(null)}
-        title={selectedName ?? config.title}
+        onClose={() => {
+          setSelectedName(null)
+          setCategoryPickerOpen(false)
+        }}
         width="regular"
-        actions={
-          selectedName ? (
-            <Button
-              tone="danger"
-              onClick={() => {
-                if (window.confirm(`Supprimer ${selectedName} ?`)) {
-                  void deleteMutation.mutateAsync()
-                }
-              }}
-            >
-              <Trash2 size={16} />
-              Supprimer
-            </Button>
-          ) : null
-        }
+        navigator={{
+          label: `${navigatorLabel(config.resource)} ${selectedReferencePosition || 0}/${visibleItems.length}`,
+          title: selectedReferenceTitle,
+          previousDisabled: selectedReferenceIndex <= 0,
+          nextDisabled: selectedReferenceIndex < 0 || selectedReferenceIndex >= visibleItems.length - 1,
+          onPrevious: () => {
+            const item = visibleItems[selectedReferenceIndex - 1]
+            if (item) {
+              setSelectedName(item.nom)
+              setCategoryPickerOpen(false)
+            }
+          },
+          onNext: () => {
+            const item = visibleItems[selectedReferenceIndex + 1]
+            if (item) {
+              setSelectedName(item.nom)
+              setCategoryPickerOpen(false)
+            }
+          },
+        }}
       >
         {!selectedName ? null : detailQuery.isLoading ? (
           <LoadingState label={`Chargement du detail de ${selectedName}...`} />
@@ -491,32 +571,50 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
               ) : null}
             </div>
 
-            {form.formState.isDirty ? (
-              <div className="button-row operation-edit-actions">
-                <Button
-                  type="button"
-                  tone="ghost"
-                  disabled={updateMutation.isPending}
-                  onClick={() => {
-                    if (!detailQuery.data) {
-                      return
-                    }
+            <div className="detail-footer-actions">
+              <div className="detail-footer-primary">
+                {form.formState.isDirty ? (
+                  <>
+                    <Button
+                      type="button"
+                      tone="ghost"
+                      disabled={updateMutation.isPending}
+                      onClick={() => {
+                        if (!detailQuery.data) {
+                          return
+                        }
 
-                    form.reset({
-                      nom: detailQuery.data.nom,
-                      libelle: detailQuery.data.libelle ?? '',
-                      nomCategorie: detailQuery.data.categorie?.nom ?? '',
-                    })
-                  }}
-                >
-                  Annuler
-                </Button>
-                <Button type="submit" disabled={updateMutation.isPending}>
-                  <Save size={16} />
-                  Modifier
-                </Button>
+                        form.reset({
+                          nom: detailQuery.data.nom,
+                          libelle: detailQuery.data.libelle ?? '',
+                          nomCategorie: detailQuery.data.categorie?.nom ?? '',
+                        })
+                      }}
+                    >
+                      Annuler
+                    </Button>
+                    <Button type="submit" disabled={updateMutation.isPending}>
+                      <Save size={16} />
+                      Modifier
+                    </Button>
+                  </>
+                ) : null}
               </div>
-            ) : null}
+              <Button
+                type="button"
+                tone="danger"
+                className="detail-delete-button"
+                disabled={deleteMutation.isPending}
+                onClick={() => {
+                  if (selectedName && window.confirm(`Supprimer ${selectedReferenceTitle} ?`)) {
+                    void deleteMutation.mutateAsync()
+                  }
+                }}
+              >
+                <Trash2 size={16} />
+                Supprimer
+              </Button>
+            </div>
           </form>
         )}
       </OverlayPanel>

@@ -6,6 +6,15 @@ import {
   type CompteTechniqueBasic,
   type EvaluationBasic,
   type OperationBasic,
+  type ReportAccountHeader,
+  type ReportBilanPatrimoineResponse,
+  type ReportDepenseRecetteResponse,
+  type ReportPeriodBilan,
+  type ReportPeriodDepenseRecette,
+  type ReportPeriodRemunerationsFrais,
+  type ReportReleveCompteResponse,
+  type ReportRemunerationsFraisResponse,
+  type ReportResumeCompteInterneResponse,
   type ReferenceBase,
   type ReferenceListItem,
 } from './monatis-api'
@@ -15,6 +24,7 @@ export interface ReleveRow {
   numero: string
   codeTypeOperation: string
   dateValeur: string
+  dateComptabilisation: string
   libelle: string | null
   montantEnEuros: number
   identifiantAutreCompte: string
@@ -40,6 +50,18 @@ export interface ReleveCompteView {
   montantEcartEnEuros: number
   operationsRecette: ReleveRow[]
   operationsDepense: ReleveRow[]
+  numeroPageOperationsRecette: number | null
+  taillePageOperationsRecette: number | null
+  totalOperationsRecette: number | null
+  totalPagesOperationsRecette: number | null
+  premierElementOperationsRecette: number | null
+  dernierElementOperationsRecette: number | null
+  numeroPageOperationsDepense: number | null
+  taillePageOperationsDepense: number | null
+  totalOperationsDepense: number | null
+  totalPagesOperationsDepense: number | null
+  premierElementOperationsDepense: number | null
+  dernierElementOperationsDepense: number | null
 }
 
 export interface ResumeCompteView {
@@ -139,6 +161,38 @@ export interface BilanPatrimoineView {
   totals: BilanPeriodView[]
 }
 
+export interface PlusMoinsValuePeriodView {
+  start: string
+  end: string
+  label: string
+  montantSoldeInitialEnEuros: number
+  montantOperationsEnEuros: number
+  montantPlusMoinsValueNetteEnEuros: number
+  tauxPlusMoinsValueNette: number | null
+  montantSoldeFinalEnEuros: number
+  montantFraisEnEuros: number
+  tauxFrais: number | null
+}
+
+export interface PlusMoinsValueAccountView {
+  identifiant: string
+  libelle: string | null
+  banque: string | null
+  periods: PlusMoinsValuePeriodView[]
+}
+
+export interface PlusMoinsValueTypeView {
+  typeFonctionnement: string
+  periods: PlusMoinsValuePeriodView[]
+  accounts: PlusMoinsValueAccountView[]
+}
+
+export interface PlusMoinsValueView {
+  periods: PeriodBucket[]
+  groups: PlusMoinsValueTypeView[]
+  totals: PlusMoinsValuePeriodView[]
+}
+
 export interface AccountLookupEntry {
   identifiant: string
   libelle: string | null
@@ -164,6 +218,19 @@ function roundMoney(value: number): number {
   return Number.parseFloat(value.toFixed(2))
 }
 
+function roundRate(value: number | null): number | null {
+  return value == null ? null : Number.parseFloat(value.toFixed(2))
+}
+
+function isoToUtcDay(value: string): number {
+  const [year, month, day] = value.split('-').map((part) => Number.parseInt(part, 10))
+  return Date.UTC(year, month - 1, day) / 86_400_000
+}
+
+function daysBetweenInclusive(start: string, end: string): number {
+  return Math.max(1, isoToUtcDay(end) - isoToUtcDay(start) + 1)
+}
+
 function periodTemplate(periods: PeriodBucket[]): PeriodTotalView[] {
   return periods.map((period) => ({
     start: period.start,
@@ -187,6 +254,21 @@ function bilanTemplate(periods: PeriodBucket[]): BilanPeriodView[] {
     montantTotalDepenseEnEuros: 0,
     soldeTotalTechniqueEnEuros: 0,
     montantEcartNonJustifieEnEuros: 0,
+  }))
+}
+
+function plusMoinsValueTemplate(periods: PeriodBucket[]): PlusMoinsValuePeriodView[] {
+  return periods.map((period) => ({
+    start: period.start,
+    end: period.end,
+    label: period.label,
+    montantSoldeInitialEnEuros: 0,
+    montantOperationsEnEuros: 0,
+    montantPlusMoinsValueNetteEnEuros: 0,
+    tauxPlusMoinsValueNette: null,
+    montantSoldeFinalEnEuros: 0,
+    montantFraisEnEuros: 0,
+    tauxFrais: null,
   }))
 }
 
@@ -227,6 +309,238 @@ function latestEvaluationAtDate(accountId: string, evaluations: EvaluationBasic[
       .filter((evaluation) => evaluation.dateSolde <= targetDate)
       .sort((left, right) => right.dateSolde.localeCompare(left.dateSolde) || right.cle.localeCompare(left.cle))[0] ?? null
   )
+}
+
+function periodLabel(start: string, end: string): string {
+  return `${formatShortDate(start)} - ${formatShortDate(end)}`
+}
+
+function periodKey(start: string, end: string): string {
+  return `${start}_${end}`
+}
+
+function reportPeriodBucket(start: string, end: string): PeriodBucket {
+  return {
+    key: periodKey(start, end),
+    label: periodLabel(start, end),
+    start,
+    end,
+  }
+}
+
+function mapReportAccountHeader(header?: ReportAccountHeader | null): ReleveCompteView['enteteCompte'] {
+  return {
+    identifiant: header?.identifiantCompte ?? '',
+    libelle: header?.libelleCompte ?? null,
+    typeCompte: header?.codeTypeCompte ?? 'INCONNU',
+    typeFonctionnement: header?.codeTypeFonctionnement ?? null,
+    banque: header?.libelleBanque ?? null,
+    titulaires: header?.libellesTitulaires ?? [],
+  }
+}
+
+function mapReportDepenseRecettePeriod(period: ReportPeriodDepenseRecette): PeriodTotalView {
+  return {
+    start: period.dateDebutPeriode,
+    end: period.dateFinPeriode,
+    label: periodLabel(period.dateDebutPeriode, period.dateFinPeriode),
+    recette: roundMoney(period.montantRecetteEnEuros ?? 0),
+    depense: roundMoney(period.montantDepenseEnEuros ?? 0),
+    solde: roundMoney(period.soldeDepenseRecetteEnEuros ?? 0),
+    details: [],
+  }
+}
+
+function mapReportRemunerationsPeriod(period: ReportPeriodRemunerationsFrais): PeriodTotalView {
+  return {
+    start: period.dateDebutPeriode,
+    end: period.dateFinPeriode,
+    label: periodLabel(period.dateDebutPeriode, period.dateFinPeriode),
+    recette: roundMoney(period.montantRemunerationsEnEuros ?? 0),
+    depense: roundMoney(period.montantFraisEnEuros ?? 0),
+    solde: roundMoney(period.soldeRemunerationsFraisEnEuros ?? 0),
+    details: [],
+  }
+}
+
+function mapReportBilanPeriod(period: ReportPeriodBilan): BilanPeriodView {
+  return {
+    start: period.dateDebutPeriode,
+    end: period.dateFinPeriode,
+    label: periodLabel(period.dateDebutPeriode, period.dateFinPeriode),
+    montantSoldeInitialEnEuros: roundMoney(period.montantSoldeInitialEnEuros ?? 0),
+    montantSoldeFinalEnEuros: roundMoney(period.montantSoldeFinalEnEuros ?? 0),
+    montantTotalRecetteEnEuros: roundMoney(period.montantTotalRecetteEnEuros ?? 0),
+    montantTotalDepenseEnEuros: roundMoney(period.montantTotalDepenseEnEuros ?? 0),
+    soldeTotalTechniqueEnEuros: roundMoney(period.soldeTotalTechniqueEnEuros ?? 0),
+    montantEcartNonJustifieEnEuros: roundMoney(period.montantEcartNonJustifieEnEuros ?? 0),
+  }
+}
+
+function hasPeriodTotal(periods: PeriodTotalView[]): boolean {
+  return periods.some((period) => period.recette !== 0 || period.depense !== 0 || period.solde !== 0)
+}
+
+function hasBilanPeriodTotal(periods: BilanPeriodView[]): boolean {
+  return periods.some(
+    (period) =>
+      period.montantSoldeInitialEnEuros !== 0 ||
+      period.montantSoldeFinalEnEuros !== 0 ||
+      period.montantTotalRecetteEnEuros !== 0 ||
+      period.montantTotalDepenseEnEuros !== 0 ||
+      period.soldeTotalTechniqueEnEuros !== 0 ||
+      period.montantEcartNonJustifieEnEuros !== 0,
+  )
+}
+
+export function mapReportReleveCompte(dto: ReportReleveCompteResponse): ReleveCompteView {
+  return {
+    enteteCompte: mapReportAccountHeader(dto.enteteCompte),
+    dateDebutReleve: dto.dateDebutReleve,
+    dateFinReleve: dto.dateFinReleve,
+    montantSoldeDebutReleveEnEuros: roundMoney(dto.montantSoldeDebutReleveEnEuros),
+    montantSoldeFinReleveEnEuros: roundMoney(dto.montantSoldeFinReleveEnEuros),
+    montantTotalOperationsRecetteEnEuros: roundMoney(dto.montantTotalOperationsRecetteEnEuros),
+    montantTotalOperationsDepenseEnEuros: roundMoney(dto.montantTotalOperationsDepenseEnEuros),
+    montantEcartEnEuros: roundMoney(dto.montantEcartEnEuros),
+    numeroPageOperationsRecette: dto.numeroPageOperationsRecette ?? null,
+    taillePageOperationsRecette: dto.taillePageOperationsRecette ?? null,
+    totalOperationsRecette: dto.totalOperationsRecette ?? null,
+    totalPagesOperationsRecette: dto.totalPagesOperationsRecette ?? null,
+    premierElementOperationsRecette: dto.premierElementOperationsRecette ?? null,
+    dernierElementOperationsRecette: dto.dernierElementOperationsRecette ?? null,
+    numeroPageOperationsDepense: dto.numeroPageOperationsDepense ?? null,
+    taillePageOperationsDepense: dto.taillePageOperationsDepense ?? null,
+    totalOperationsDepense: dto.totalOperationsDepense ?? null,
+    totalPagesOperationsDepense: dto.totalPagesOperationsDepense ?? null,
+    premierElementOperationsDepense: dto.premierElementOperationsDepense ?? null,
+    dernierElementOperationsDepense: dto.dernierElementOperationsDepense ?? null,
+    operationsRecette: (dto.operationsRecette ?? []).map((operation) => ({
+      numero: operation.numero,
+      codeTypeOperation: operation.codeTypeOperation,
+      dateValeur: operation.dateValeur,
+      dateComptabilisation: operation.dateComptabilisation ?? operation.dateValeur,
+      libelle: operation.libelle,
+      montantEnEuros: roundMoney(operation.montantEnEuros),
+      identifiantAutreCompte: operation.identifiantAutreCompte,
+      libelleAutreCompte: operation.libelleAutreCompte,
+      codeTypeAutreCompte: operation.codeTypeAutreCompte,
+    })),
+    operationsDepense: (dto.operationsDepense ?? []).map((operation) => ({
+      numero: operation.numero,
+      codeTypeOperation: operation.codeTypeOperation,
+      dateValeur: operation.dateValeur,
+      dateComptabilisation: operation.dateComptabilisation ?? operation.dateValeur,
+      libelle: operation.libelle,
+      montantEnEuros: roundMoney(Math.abs(operation.montantEnEuros)),
+      identifiantAutreCompte: operation.identifiantAutreCompte,
+      libelleAutreCompte: operation.libelleAutreCompte,
+      codeTypeAutreCompte: operation.codeTypeAutreCompte,
+    })),
+  }
+}
+
+export function mapReportResumesComptes(dtos: ReportResumeCompteInterneResponse[]): ResumeCompteView[] {
+  return dtos
+    .map((dto) => ({
+      identifiant: dto.compteInterne?.identifiantCompte ?? '',
+      libelle: dto.compteInterne?.libelleCompte ?? null,
+      typeFonctionnement: dto.compteInterne?.codeTypeFonctionnement ?? 'INTERNE',
+      dateSolde: dto.dateSolde,
+      montantSoldeEnEuros: roundMoney(dto.montantSoldeEnEuros ?? 0),
+      banque: dto.compteInterne?.libelleBanque ?? null,
+      titulaires: dto.compteInterne?.libellesTitulaires ?? [],
+    }))
+    .filter((row) => row.identifiant)
+    .sort((left, right) => left.identifiant.localeCompare(right.identifiant))
+}
+
+export function mapReportDepenseRecette(dto: ReportDepenseRecetteResponse): DepenseRecetteView {
+  const periods = (dto.cumuls ?? []).map((period) => reportPeriodBucket(period.dateDebutPeriode, period.dateFinPeriode))
+  const categories = (dto.lignesCategorie ?? [])
+    .map((category) => {
+      const totals = (category.cumuls ?? []).map(mapReportDepenseRecettePeriod)
+      const children = (category.lignesSousCategorie ?? [])
+        .map((child) => ({
+          sousCategorie: child.sousCategorie
+            ? {
+                nom: child.sousCategorie.nom,
+                libelle: child.sousCategorie.libelle ?? null,
+              }
+            : null,
+          periods: (child.periodes ?? []).map(mapReportDepenseRecettePeriod),
+        }))
+        .filter((child) => hasPeriodTotal(child.periods))
+
+      return {
+        categorie: category.categorie
+          ? {
+              nom: category.categorie.nom,
+              libelle: category.categorie.libelle ?? null,
+            }
+          : null,
+        totals,
+        children,
+      }
+    })
+    .filter((category) => hasPeriodTotal(category.totals) || category.children.length > 0)
+
+  return {
+    periods,
+    categories,
+    totals: (dto.cumuls ?? []).map(mapReportDepenseRecettePeriod),
+  }
+}
+
+export function mapReportRemunerationsFrais(dto: ReportRemunerationsFraisResponse): RemunerationsFraisView {
+  return {
+    periods: (dto.cumuls ?? []).map((period) => reportPeriodBucket(period.dateDebutPeriode, period.dateFinPeriode)),
+    groups: (dto.lignesTypeFonctionnement ?? [])
+      .map((group) => {
+        const periods = (group.cumulsPeriodes ?? []).map(mapReportRemunerationsPeriod)
+        return {
+          typeFonctionnement: group.typeFonctionnement?.code ?? 'INDETERMINE',
+          periods,
+          accounts: (group.lignesCompteInterne ?? [])
+            .map((account) => ({
+              identifiant: account.compteInterne?.identifiantCompte ?? '',
+              libelle: account.compteInterne?.libelleCompte ?? null,
+              banque: account.compteInterne?.libelleBanque ?? null,
+              periods: (account.periodes ?? []).map(mapReportRemunerationsPeriod),
+            }))
+            .filter((account) => account.identifiant && hasPeriodTotal(account.periods)),
+        }
+      })
+      .filter((group) => hasPeriodTotal(group.periods) || group.accounts.length > 0),
+    totals: (dto.cumuls ?? []).map(mapReportRemunerationsPeriod),
+  }
+}
+
+export function mapReportBilanPatrimoine(dto: ReportBilanPatrimoineResponse): BilanPatrimoineView {
+  return {
+    periods: (dto.cumuls ?? []).map((period) => reportPeriodBucket(period.dateDebutPeriode, period.dateFinPeriode)),
+    montantSoldeInitialEnEuros: roundMoney(dto.montantSoldeInitialEnEuros ?? 0),
+    groups: (dto.lignesTypeFonctionnement ?? [])
+      .map((group) => {
+        const periods = (group.cumulsPeriodes ?? []).map(mapReportBilanPeriod)
+        return {
+          typeFonctionnement: group.typeFonctionnement?.code ?? 'INDETERMINE',
+          montantSoldeInitialEnEuros: roundMoney(group.montantSoldeInitialEnEuros ?? 0),
+          periods,
+          accounts: (group.lignesCompteInterne ?? [])
+            .map((account) => ({
+              identifiant: account.compteInterne?.identifiantCompte ?? '',
+              libelle: account.compteInterne?.libelleCompte ?? null,
+              banque: account.compteInterne?.libelleBanque ?? null,
+              montantSoldeInitialEnEuros: roundMoney(account.montantSoldeInitialEnEuros ?? 0),
+              periods: (account.periodes ?? []).map(mapReportBilanPeriod),
+            }))
+            .filter((account) => account.identifiant && hasBilanPeriodTotal(account.periods)),
+        }
+      })
+      .filter((group) => hasBilanPeriodTotal(group.periods) || group.accounts.length > 0),
+    totals: (dto.cumuls ?? []).map(mapReportBilanPeriod),
+  }
 }
 
 export function buildAccountLookup(
@@ -270,6 +584,15 @@ function operationAffectsAccount(operation: OperationBasic, accountId: string): 
   return depenseId(operation) === accountId || recetteId(operation) === accountId
 }
 
+function operationAccountingDate(operation: OperationBasic): string {
+  const primaryLine = operation.lignes.find((line) => line.numeroLigne === 0) ?? operation.lignes[0]
+  return primaryLine?.dateComptabilisation ?? operation.dateValeur
+}
+
+function operationIsTechnical(operation: OperationBasic): boolean {
+  return operation.typeOperation?.fluxTechnique ?? false
+}
+
 export function computeBalanceAtDate(
   account: CompteInterneBasic,
   operations: OperationBasic[],
@@ -294,7 +617,8 @@ export function computeBalanceAtDate(
       return
     }
 
-    if (operation.dateValeur <= referenceDate || operation.dateValeur > targetDate) {
+    const accountingDate = operationAccountingDate(operation)
+    if (accountingDate <= referenceDate || accountingDate > targetDate) {
       return
     }
 
@@ -323,8 +647,8 @@ export function buildReleveCompte(
 
   operations
     .filter((operation) => operationAffectsAccount(operation, account.identifiant))
-    .filter((operation) => isIsoWithinRange(operation.dateValeur, start, end))
-    .sort((left, right) => left.dateValeur.localeCompare(right.dateValeur) || left.numero.localeCompare(right.numero))
+    .filter((operation) => isIsoWithinRange(operationAccountingDate(operation), start, end))
+    .sort((left, right) => operationAccountingDate(right).localeCompare(operationAccountingDate(left)) || left.numero.localeCompare(right.numero))
     .forEach((operation) => {
       const isRecette = recetteId(operation) === account.identifiant
       const otherId = isRecette ? depenseId(operation) : recetteId(operation)
@@ -333,6 +657,7 @@ export function buildReleveCompte(
         numero: operation.numero,
         codeTypeOperation: operationCode(operation),
         dateValeur: operation.dateValeur,
+        dateComptabilisation: operationAccountingDate(operation),
         libelle: operation.libelle,
         montantEnEuros: roundMoney(centsToEuros(operation.montantEnCentimes)),
         identifiantAutreCompte: otherId,
@@ -377,6 +702,18 @@ export function buildReleveCompte(
     ),
     operationsRecette,
     operationsDepense,
+    numeroPageOperationsRecette: null,
+    taillePageOperationsRecette: null,
+    totalOperationsRecette: null,
+    totalPagesOperationsRecette: null,
+    premierElementOperationsRecette: null,
+    dernierElementOperationsRecette: null,
+    numeroPageOperationsDepense: null,
+    taillePageOperationsDepense: null,
+    totalOperationsDepense: null,
+    totalPagesOperationsDepense: null,
+    premierElementOperationsDepense: null,
+    dernierElementOperationsDepense: null,
   }
 }
 
@@ -671,6 +1008,152 @@ export function buildRemunerationsFraisReport(params: {
       depense: roundMoney(item.depense),
       solde: roundMoney(item.solde),
     })),
+  }
+}
+
+function computePlusMoinsValuePeriod(params: {
+  account: CompteInterneBasic
+  operations: OperationBasic[]
+  evaluations: EvaluationBasic[]
+  period: PeriodBucket
+}): PlusMoinsValuePeriodView {
+  const { account, operations, evaluations, period } = params
+  const initial = computeBalanceAtDate(account, operations, dayBefore(period.start), evaluations)
+  const final = computeBalanceAtDate(account, operations, period.end, evaluations)
+  const daysInPeriod = daysBetweenInclusive(period.start, period.end)
+  const periodOperations = operations
+    .filter((operation) => operationAffectsAccount(operation, account.identifiant))
+    .filter((operation) => isIsoWithinRange(operation.dateValeur, period.start, period.end))
+
+  const weightedRecettes = periodOperations
+    .filter((operation) => recetteId(operation) === account.identifiant)
+    .filter((operation) => !operationIsTechnical(operation))
+    .reduce((total, operation) => {
+      const daysInvested = daysBetweenInclusive(operation.dateValeur, period.end)
+      return total + (operation.montantEnCentimes * daysInvested) / daysInPeriod
+    }, 0)
+
+  const weightedDepenses = periodOperations
+    .filter((operation) => depenseId(operation) === account.identifiant)
+    .filter((operation) => !operationIsTechnical(operation))
+    .reduce((total, operation) => {
+      const daysInvested = daysBetweenInclusive(operation.dateValeur, period.end)
+      return total + (operation.montantEnCentimes * daysInvested) / daysInPeriod
+    }, 0)
+
+  const initialOpeningInPeriod = account.dateSoldeInitial > period.start && account.dateSoldeInitial <= period.end ? account.montantSoldeInitialEnCentimes ?? 0 : 0
+  const operationsAmount = centsToEuros(weightedRecettes + initialOpeningInPeriod - weightedDepenses)
+  const startWithOperations = initial + operationsAmount
+  const plusMoinsValue = final - startWithOperations
+  const technicalFees = periodOperations
+    .filter((operation) => depenseId(operation) === account.identifiant)
+    .filter((operation) => operationIsTechnical(operation))
+    .reduce((total, operation) => total + centsToEuros(operation.montantEnCentimes), 0)
+
+  return {
+    start: period.start,
+    end: period.end,
+    label: period.label,
+    montantSoldeInitialEnEuros: roundMoney(initial),
+    montantOperationsEnEuros: roundMoney(operationsAmount),
+    montantPlusMoinsValueNetteEnEuros: roundMoney(plusMoinsValue),
+    tauxPlusMoinsValueNette: roundRate(startWithOperations === 0 ? null : (100 * plusMoinsValue) / startWithOperations),
+    montantSoldeFinalEnEuros: roundMoney(final),
+    montantFraisEnEuros: roundMoney(technicalFees),
+    tauxFrais: roundRate(final === 0 ? null : (100 * technicalFees) / final),
+  }
+}
+
+function recomputePlusMoinsRates(period: PlusMoinsValuePeriodView): PlusMoinsValuePeriodView {
+  const startWithOperations = period.montantSoldeInitialEnEuros + period.montantOperationsEnEuros
+
+  return {
+    ...period,
+    montantSoldeInitialEnEuros: roundMoney(period.montantSoldeInitialEnEuros),
+    montantOperationsEnEuros: roundMoney(period.montantOperationsEnEuros),
+    montantPlusMoinsValueNetteEnEuros: roundMoney(period.montantPlusMoinsValueNetteEnEuros),
+    tauxPlusMoinsValueNette: roundRate(startWithOperations === 0 ? null : (100 * period.montantPlusMoinsValueNetteEnEuros) / startWithOperations),
+    montantSoldeFinalEnEuros: roundMoney(period.montantSoldeFinalEnEuros),
+    montantFraisEnEuros: roundMoney(period.montantFraisEnEuros),
+    tauxFrais: roundRate(period.montantSoldeFinalEnEuros === 0 ? null : (100 * period.montantFraisEnEuros) / period.montantSoldeFinalEnEuros),
+  }
+}
+
+export function buildPlusMoinsValueReport(params: {
+  operations: OperationBasic[]
+  internalAccounts: CompteInterneBasic[]
+  evaluations?: EvaluationBasic[]
+  dateDebut: string
+  dateFin: string
+  codeTypePeriode?: MonatisPeriodCode
+  accountIds?: string[]
+  codesTypes?: string[]
+  nomTitulaire?: string | null
+}): PlusMoinsValueView {
+  const periods = buildPeriodBuckets(params.dateDebut, params.dateFin, params.codeTypePeriode)
+  const groups = new Map<string, PlusMoinsValueTypeView>()
+  const evaluations = params.evaluations ?? []
+
+  const eligibleAccounts = params.internalAccounts
+    .filter((account) => !params.accountIds?.length || params.accountIds.includes(account.identifiant))
+    .filter((account) => !params.codesTypes?.length || params.codesTypes.includes(account.codeTypeFonctionnement))
+    .filter((account) => !params.nomTitulaire || account.nomsTitulaires.includes(params.nomTitulaire))
+
+  eligibleAccounts.forEach((account) => {
+    if (!groups.has(account.codeTypeFonctionnement)) {
+      groups.set(account.codeTypeFonctionnement, {
+        typeFonctionnement: account.codeTypeFonctionnement,
+        periods: plusMoinsValueTemplate(periods),
+        accounts: [],
+      })
+    }
+
+    const accountPeriods = periods.map((period) => computePlusMoinsValuePeriod({ account, operations: params.operations, evaluations, period }))
+    const group = groups.get(account.codeTypeFonctionnement)!
+    group.accounts.push({
+      identifiant: account.identifiant,
+      libelle: account.libelle,
+      banque: account.nomBanque,
+      periods: accountPeriods,
+    })
+
+    accountPeriods.forEach((period, index) => {
+      group.periods[index].montantSoldeInitialEnEuros += period.montantSoldeInitialEnEuros
+      group.periods[index].montantOperationsEnEuros += period.montantOperationsEnEuros
+      group.periods[index].montantPlusMoinsValueNetteEnEuros += period.montantPlusMoinsValueNetteEnEuros
+      group.periods[index].montantSoldeFinalEnEuros += period.montantSoldeFinalEnEuros
+      group.periods[index].montantFraisEnEuros += period.montantFraisEnEuros
+    })
+  })
+
+  const normalizedGroups = Array.from(groups.values())
+    .map((group) => ({
+      ...group,
+      periods: group.periods.map(recomputePlusMoinsRates),
+      accounts: group.accounts
+        .sort((left, right) => left.identifiant.localeCompare(right.identifiant))
+        .map((account) => ({
+          ...account,
+          periods: account.periods.map(recomputePlusMoinsRates),
+        })),
+    }))
+    .sort((left, right) => left.typeFonctionnement.localeCompare(right.typeFonctionnement))
+
+  const totals = plusMoinsValueTemplate(periods)
+  normalizedGroups.forEach((group) => {
+    group.periods.forEach((period, index) => {
+      totals[index].montantSoldeInitialEnEuros += period.montantSoldeInitialEnEuros
+      totals[index].montantOperationsEnEuros += period.montantOperationsEnEuros
+      totals[index].montantPlusMoinsValueNetteEnEuros += period.montantPlusMoinsValueNetteEnEuros
+      totals[index].montantSoldeFinalEnEuros += period.montantSoldeFinalEnEuros
+      totals[index].montantFraisEnEuros += period.montantFraisEnEuros
+    })
+  })
+
+  return {
+    periods,
+    groups: normalizedGroups,
+    totals: totals.map(recomputePlusMoinsRates),
   }
 }
 

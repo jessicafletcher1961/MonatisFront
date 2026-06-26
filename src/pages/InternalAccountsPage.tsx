@@ -6,9 +6,11 @@ import { useForm, useWatch } from 'react-hook-form'
 import { z } from 'zod'
 
 import { QuickReferenceOverlay, type QuickReferenceDialogState } from '../components/quick-create'
-import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, QuickAddButton, Surface } from '../components/ui'
+import { DEFAULT_CATALOG_PAGE_SIZE } from '../components/pagination-constants'
+import { CatalogPaginationControls } from '../components/pagination-controls'
+import { Badge, Button, EmptyState, ErrorState, FormField, LoadingState, OverlayPanel, PageHeader, QuickAddButton, Surface } from '../components/ui'
 import { cx } from '../lib/cx'
-import { apiErrorMessage, type EvaluationBasic, type ReferenceListItem, type TypeFonctionnement, monatisApi } from '../lib/monatis-api'
+import { apiErrorMessage, type CompteInterneBasic, type CompteInterneDetail, type EvaluationBasic, type ReferenceListItem, type TypeFonctionnement, monatisApi } from '../lib/monatis-api'
 import { formatCurrency, formatCurrencyFromCents, formatDate, nullIfBlank, parseMoneyToCents, toMoneyInput, todayIso } from '../lib/format'
 import { computeBalanceAtDate, latestOperationsForAccount, readableOperationLabel } from '../lib/reporting'
 
@@ -34,6 +36,7 @@ type AccountFormValues = z.infer<typeof accountSchema>
 type EvaluationFormValues = z.infer<typeof evaluationSchema>
 type DetailTab = 'overview' | 'evaluations' | 'operations'
 type CreateStep = 'type' | 'identifiant' | 'banque' | 'review'
+type AccountFilterPicker = 'type' | 'titulaire' | null
 
 const ACCOUNT_DEFAULTS: AccountFormValues = {
   identifiant: '',
@@ -75,6 +78,32 @@ function previewTip(label: string, value: string): string {
   return `${label}. ${value.trim() || 'Vide'}`
 }
 
+function compactSelectionLabel(values: string[], emptyLabel: string): string {
+  if (!values.length) {
+    return emptyLabel
+  }
+
+  if (values.length === 1) {
+    return values[0]
+  }
+
+  return `${values.length} selectionnes`
+}
+
+function detailToBasicAccount(account: CompteInterneDetail): CompteInterneBasic {
+  return {
+    id: account.id,
+    identifiant: account.identifiant,
+    libelle: account.libelle,
+    dateCloture: account.dateCloture,
+    codeTypeFonctionnement: account.typeFonctionnement.code,
+    dateSoldeInitial: account.dateSoldeInitial,
+    montantSoldeInitialEnCentimes: account.montantSoldeInitialEnCentimes,
+    nomBanque: account.banque?.nom ?? null,
+    nomsTitulaires: account.titulaires.map((titulaire) => titulaire.nom),
+  }
+}
+
 export function InternalAccountsPage() {
   const queryClient = useQueryClient()
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -82,7 +111,12 @@ export function InternalAccountsPage() {
   const [detailTab, setDetailTab] = useState<DetailTab>('overview')
   const [selectedEvaluationKey, setSelectedEvaluationKey] = useState<string | null>(null)
   const [search, setSearch] = useState('')
-  const [typeFilter, setTypeFilter] = useState<string>('TOUS')
+  const [pageIndex, setPageIndex] = useState(1)
+  const [pageSize, setPageSize] = useState(DEFAULT_CATALOG_PAGE_SIZE)
+  const [selectedTypeFilters, setSelectedTypeFilters] = useState<string[]>([])
+  const [selectedTitulaireFilters, setSelectedTitulaireFilters] = useState<string[]>([])
+  const [accountFilterPicker, setAccountFilterPicker] = useState<AccountFilterPicker>(null)
+  const [titulaireFilterSearch, setTitulaireFilterSearch] = useState('')
   const [createStep, setCreateStep] = useState<CreateStep>('type')
   const [bankSearch, setBankSearch] = useState('')
   const [createDateClotureOpen, setCreateDateClotureOpen] = useState(false)
@@ -91,10 +125,19 @@ export function InternalAccountsPage() {
   const createIdentifiantRef = useRef<HTMLInputElement | null>(null)
   const deferredSearch = useDeferredValue(search)
   const deferredBankSearch = useDeferredValue(bankSearch)
+  const deferredTitulaireFilterSearch = useDeferredValue(titulaireFilterSearch)
 
   const accountsQuery = useQuery({
-    queryKey: ['comptes', 'internes'],
-    queryFn: () => monatisApi.listInternalAccounts(),
+    queryKey: ['comptes', 'internes', 'page', pageIndex, pageSize, deferredSearch, selectedTypeFilters, selectedTitulaireFilters],
+    queryFn: () =>
+      monatisApi.listInternalAccountsPage({
+        numeroPage: pageIndex,
+        taillePage: pageSize,
+        recherche: deferredSearch.trim() || null,
+        codesTypeFonctionnement: selectedTypeFilters.length ? selectedTypeFilters : null,
+        nomsTitulaires: selectedTitulaireFilters.length ? selectedTitulaireFilters : null,
+      }),
+    placeholderData: (previousData) => previousData,
   })
 
   const detailQuery = useQuery({
@@ -221,22 +264,35 @@ export function InternalAccountsPage() {
     [typeQuery.data],
   )
 
-  const filteredAccounts = useMemo(() => {
-    const needle = deferredSearch.trim().toLowerCase()
+  const selectedTypeItems = useMemo(
+    () => sortedTypes.filter((type) => selectedTypeFilters.includes(type.code)),
+    [selectedTypeFilters, sortedTypes],
+  )
 
-    return (accountsQuery.data ?? [])
-      .filter((account) => typeFilter === 'TOUS' || account.codeTypeFonctionnement === typeFilter)
-      .filter((account) => {
+  const filteredTitulaireOptions = useMemo(() => {
+    const needle = deferredTitulaireFilterSearch.trim().toLowerCase()
+    return (titulairesQuery.data ?? [])
+      .filter((titulaire) => {
         if (!needle) {
           return true
         }
 
-        return [account.identifiant, account.libelle, account.nomBanque, ...account.nomsTitulaires]
-          .filter(Boolean)
-          .some((value) => String(value).toLowerCase().includes(needle))
+        return [titulaire.nom, titulaire.libelle].filter(Boolean).some((value) => String(value).toLowerCase().includes(needle))
       })
-      .sort((left, right) => left.identifiant.localeCompare(right.identifiant))
-  }, [accountsQuery.data, deferredSearch, typeFilter])
+      .sort((left, right) => left.nom.localeCompare(right.nom))
+  }, [deferredTitulaireFilterSearch, titulairesQuery.data])
+
+  const selectedTitulaireItems = useMemo(
+    () => (titulairesQuery.data ?? []).filter((titulaire) => selectedTitulaireFilters.includes(titulaire.nom)),
+    [selectedTitulaireFilters, titulairesQuery.data],
+  )
+
+  const visibleAccounts = useMemo(() => accountsQuery.data?.comptes ?? [], [accountsQuery.data?.comptes])
+  const accountTotalCount = accountsQuery.data?.totalComptes ?? 0
+  const accountTotalPages = accountsQuery.data?.totalPages ?? 0
+  const accountCurrentPage = accountsQuery.data?.numeroPage ?? pageIndex
+  const accountFirstVisible = accountsQuery.data?.premierElement ?? 0
+  const accountLastVisible = accountsQuery.data?.dernierElement ?? 0
 
   const filteredBanks = useMemo(
     () => (banquesQuery.data ?? []).filter((bank) => bankMatches(bank, deferredBankSearch)).sort((left, right) => left.nom.localeCompare(right.nom)),
@@ -244,9 +300,15 @@ export function InternalAccountsPage() {
   )
 
   const selectedAccount = useMemo(
-    () => (accountsQuery.data ?? []).find((account) => account.identifiant === selectedId) ?? null,
-    [accountsQuery.data, selectedId],
+    () => visibleAccounts.find((account) => account.identifiant === selectedId) ?? (detailQuery.data ? detailToBasicAccount(detailQuery.data) : null),
+    [detailQuery.data, selectedId, visibleAccounts],
   )
+  const selectedAccountIndex = useMemo(
+    () => (selectedId ? visibleAccounts.findIndex((account) => account.identifiant === selectedId) : -1),
+    [selectedId, visibleAccounts],
+  )
+  const selectedAccountPosition = selectedAccountIndex >= 0 ? selectedAccountIndex + 1 : 0
+  const selectedAccountTitle = selectedAccount?.libelle?.trim() || selectedAccount?.identifiant || selectedId || 'Compte interne'
 
   const accountEvaluations = useMemo(
     () =>
@@ -271,12 +333,12 @@ export function InternalAccountsPage() {
       return balances
     }
 
-    ;(accountsQuery.data ?? []).forEach((account) => {
+    visibleAccounts.forEach((account) => {
       balances.set(account.identifiant, computeBalanceAtDate(account, operationsQuery.data, todayIso(), evaluationsQuery.data ?? []))
     })
 
     return balances
-  }, [accountsQuery.data, evaluationsQuery.data, operationsQuery.data])
+  }, [evaluationsQuery.data, operationsQuery.data, visibleAccounts])
 
   const latestOperations = useMemo(() => {
     if (!selectedId || !operationsQuery.data) {
@@ -482,6 +544,34 @@ export function InternalAccountsPage() {
     }
   }
 
+  function toggleTypeFilter(code: string) {
+    setPageIndex(1)
+    setSelectedTypeFilters((current) => (current.includes(code) ? current.filter((item) => item !== code) : [...current, code]))
+  }
+
+  function toggleTitulaireFilter(nom: string) {
+    setPageIndex(1)
+    setSelectedTitulaireFilters((current) => (current.includes(nom) ? current.filter((item) => item !== nom) : [...current, nom]))
+  }
+
+  function clearAccountFilters() {
+    setPageIndex(1)
+    setSelectedTypeFilters([])
+    setSelectedTitulaireFilters([])
+  }
+
+  function renderAccountFilterButton(label: string, value: string, picker: Exclude<AccountFilterPicker, null>) {
+    return (
+      <button type="button" className="picker-field picker-field-compact operation-filter-button" onClick={() => setAccountFilterPicker(picker)}>
+        <div className="picker-field-content">
+          <span className="operation-filter-button-label">{label}</span>
+          <strong>{value}</strong>
+        </div>
+        <ChevronDown size={16} />
+      </button>
+    )
+  }
+
   const createTrail = [
     { step: 'type' as const, label: selectedCreateType?.code ?? 'Type' },
     { step: 'identifiant' as const, label: createIdentifiant.trim() || 'Nom' },
@@ -503,68 +593,188 @@ export function InternalAccountsPage() {
         }
       />
 
-      {accountsQuery.isLoading ? <LoadingState label="Chargement des comptes internes..." /> : null}
+      {accountsQuery.isLoading && !accountsQuery.data ? <LoadingState label="Chargement des comptes internes..." /> : null}
       {hasError ? <ErrorState message={apiErrorMessage(hasError)} /> : null}
 
       <Surface className="catalog-panel">
-        <FilterBar>
-          <label className="search-field">
-            <Search size={16} />
-            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Chercher un identifiant, une banque ou un titulaire..." />
-          </label>
+        <div className="operation-filter-stack">
+          <div className="operation-filter-row">
+            {renderAccountFilterButton(
+              'Type',
+              compactSelectionLabel(selectedTypeItems.map((type) => typeCodeLabel(type)), 'Tous'),
+              'type',
+            )}
+            {renderAccountFilterButton(
+              'Titulaire',
+              compactSelectionLabel(selectedTitulaireItems.map((titulaire) => titulaire.nom), 'Tous'),
+              'titulaire',
+            )}
+            <Button type="button" tone="ghost" onClick={clearAccountFilters}>
+              Reinitialiser
+            </Button>
+          </div>
 
-          <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
-            <option value="TOUS">Tous les types</option>
-            {sortedTypes.map((type) => (
-              <option key={type.code} value={type.code}>
-                {typeLabel(type)}
-              </option>
-            ))}
-          </select>
-        </FilterBar>
+          <div className="operation-search-pagination-row">
+            <label className="search-field operation-history-search">
+              <Search size={16} />
+              <input
+                value={search}
+                onChange={(event) => {
+                  setSearch(event.target.value)
+                  setPageIndex(1)
+                }}
+                placeholder="Chercher un identifiant, une banque ou un titulaire..."
+              />
+            </label>
 
-        {!filteredAccounts.length ? (
+            <CatalogPaginationControls
+              ariaLabel="Pagination des comptes internes haut"
+              totalCount={accountTotalCount}
+              firstVisible={accountFirstVisible}
+              lastVisible={accountLastVisible}
+              currentPage={accountCurrentPage}
+              totalPages={accountTotalPages}
+              pageSize={pageSize}
+              pageSizeLabel="Nombre de comptes internes affiches"
+              onPageChange={setPageIndex}
+              onPageSizeChange={(size) => {
+                setPageSize(size)
+                setPageIndex(1)
+              }}
+            />
+          </div>
+        </div>
+
+        {!visibleAccounts.length ? (
           <EmptyState title="Aucun compte visible" description="Creer un compte ou elargir le filtre." />
         ) : (
-          <div className="catalog-grid catalog-grid-wide">
-            {filteredAccounts.map((account) => (
+          <div className="operation-history-list compact-entity-list">
+            {visibleAccounts.map((account) => (
               <button
                 key={account.identifiant}
                 type="button"
-                className={cx('catalog-card', selectedId === account.identifiant && 'selected')}
+                className={cx('operation-history-row compact-entity-row account-row', selectedId === account.identifiant && 'selected')}
                 onClick={() => {
                   setSelectedId(account.identifiant)
                   setEditDateClotureOpen(false)
                   setDetailTab('overview')
                 }}
               >
-                <div className="catalog-card-head">
-                  <div>
-                    <strong>{account.identifiant}</strong>
-                    <p>{account.libelle ?? 'Sans libelle'}</p>
-                  </div>
-                  <Badge>{account.codeTypeFonctionnement}</Badge>
+                <div className="operation-history-main">
+                  <strong title={account.identifiant}>{account.identifiant}</strong>
+                  <span title={account.libelle ?? 'Sans libelle'}>{account.libelle ?? 'Sans libelle'}</span>
                 </div>
 
-                <div className="catalog-meta-grid">
-                  <div className="catalog-meta-pair">
-                    <span>Montant estime</span>
-                    <strong>{balancesByAccount.has(account.identifiant) ? formatCurrency(balancesByAccount.get(account.identifiant) ?? 0) : '...'}</strong>
-                  </div>
-                  <div className="catalog-meta-pair">
-                    <span>Banque</span>
-                    <strong>{account.nomBanque ?? 'Aucune'}</strong>
-                  </div>
-                  <div className="catalog-meta-pair">
-                    <span>Titulaires</span>
-                    <strong>{account.nomsTitulaires.length ? account.nomsTitulaires.join(', ') : 'Aucun'}</strong>
-                  </div>
+                <div className="operation-history-flow" title={account.nomBanque ?? 'Aucune banque'}>
+                  <span>{account.nomBanque ?? 'Aucune banque'}</span>
                 </div>
+                <Badge>{account.codeTypeFonctionnement}</Badge>
+                <div className="operation-history-reference" title={account.nomsTitulaires.length ? account.nomsTitulaires.join(', ') : 'Aucun titulaire'}>
+                  {account.nomsTitulaires.length ? account.nomsTitulaires.join(', ') : 'Aucun titulaire'}
+                </div>
+                <strong className="operation-history-amount">{balancesByAccount.has(account.identifiant) ? formatCurrency(balancesByAccount.get(account.identifiant) ?? 0) : '...'}</strong>
               </button>
             ))}
           </div>
         )}
+
+        <CatalogPaginationControls
+          ariaLabel="Pagination des comptes internes bas"
+          totalCount={accountTotalCount}
+          firstVisible={accountFirstVisible}
+          lastVisible={accountLastVisible}
+          currentPage={accountCurrentPage}
+          totalPages={accountTotalPages}
+          pageSize={pageSize}
+          position="bottom"
+          pageSizeLabel="Nombre de comptes internes affiches"
+          onPageChange={setPageIndex}
+          onPageSizeChange={(size) => {
+            setPageSize(size)
+            setPageIndex(1)
+          }}
+        />
       </Surface>
+
+      <OverlayPanel open={accountFilterPicker === 'type'} onClose={() => setAccountFilterPicker(null)} title="Types de comptes" width="regular" overlayClassName="overlay-top" className="filter-panel">
+        <div className="filter-panel-shell">
+          <div className="filter-panel-sticky">
+            <div className="filter-panel-toolbar">
+              <Button
+                type="button"
+                tone="ghost"
+                onClick={() => {
+                  setPageIndex(1)
+                  setSelectedTypeFilters([])
+                }}
+              >
+                Reinitialiser
+              </Button>
+              <Button type="button" onClick={() => setAccountFilterPicker(null)}>
+                Valider
+              </Button>
+            </div>
+          </div>
+          <div className="wizard-choice-grid filter-choice-grid">
+            {sortedTypes.map((type) => {
+              const active = selectedTypeFilters.includes(type.code)
+              return (
+                <button key={type.code} type="button" className={cx('wizard-choice-card filter-choice-card compact', active && 'active')} onClick={() => toggleTypeFilter(type.code)}>
+                  <div>
+                    <strong>{typeCodeLabel(type)}</strong>
+                    <span>{typeLabel(type)}</span>
+                  </div>
+                  {active ? <Check size={16} /> : null}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      </OverlayPanel>
+
+      <OverlayPanel open={accountFilterPicker === 'titulaire'} onClose={() => setAccountFilterPicker(null)} title="Titulaires" width="regular" overlayClassName="overlay-top" className="filter-panel">
+        <div className="filter-panel-shell">
+          <div className="filter-panel-sticky">
+            <div className="filter-panel-toolbar">
+              <Button
+                type="button"
+                tone="ghost"
+                onClick={() => {
+                  setPageIndex(1)
+                  setSelectedTitulaireFilters([])
+                }}
+              >
+                Reinitialiser
+              </Button>
+              <Button type="button" onClick={() => setAccountFilterPicker(null)}>
+                Valider
+              </Button>
+            </div>
+            <label className="search-field search-field-thin filter-panel-search">
+              <Search size={14} />
+              <input value={titulaireFilterSearch} onChange={(event) => setTitulaireFilterSearch(event.target.value)} placeholder="Chercher un titulaire..." />
+            </label>
+          </div>
+          {!filteredTitulaireOptions.length ? (
+            <EmptyState title="Aucun titulaire" description="Aucun titulaire ne correspond a la recherche." />
+          ) : (
+            <div className="wizard-choice-grid filter-choice-grid">
+              {filteredTitulaireOptions.map((titulaire) => {
+                const active = selectedTitulaireFilters.includes(titulaire.nom)
+                return (
+                  <button key={titulaire.nom} type="button" className={cx('wizard-choice-card filter-choice-card compact', active && 'active')} onClick={() => toggleTitulaireFilter(titulaire.nom)}>
+                    <div>
+                      <strong>{titulaire.nom}</strong>
+                      <span>{titulaire.libelle ?? ' '}</span>
+                    </div>
+                    {active ? <Check size={16} /> : null}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      </OverlayPanel>
 
       <OverlayPanel open={createOpen} onClose={closeCreateFlow} title="Nouveau compte interne" width="wide">
         <form
@@ -812,23 +1022,35 @@ export function InternalAccountsPage() {
           setSelectedEvaluationKey(null)
           setEditDateClotureOpen(false)
         }}
-        title={selectedId ?? 'Compte interne'}
         width="wide"
-        actions={
-          selectedId ? (
-            <Button
-              tone="danger"
-              onClick={() => {
-                if (window.confirm(`Supprimer ${selectedId} ?`)) {
-                  void deleteAccountMutation.mutateAsync()
-                }
-              }}
-            >
-              <Trash2 size={16} />
-              Supprimer
-            </Button>
-          ) : null
-        }
+        navigator={{
+          label: `Compte interne ${selectedAccountPosition || 0}/${visibleAccounts.length}`,
+          title: selectedAccountTitle,
+          previousDisabled: selectedAccountIndex <= 0,
+          nextDisabled: selectedAccountIndex < 0 || selectedAccountIndex >= visibleAccounts.length - 1,
+          onPrevious: () => {
+            const account = visibleAccounts[selectedAccountIndex - 1]
+            if (!account) {
+              return
+            }
+
+            setSelectedId(account.identifiant)
+            setSelectedEvaluationKey(null)
+            setEditDateClotureOpen(false)
+            setDetailTab('overview')
+          },
+          onNext: () => {
+            const account = visibleAccounts[selectedAccountIndex + 1]
+            if (!account) {
+              return
+            }
+
+            setSelectedId(account.identifiant)
+            setSelectedEvaluationKey(null)
+            setEditDateClotureOpen(false)
+            setDetailTab('overview')
+          },
+        }}
       >
         {!selectedId ? null : detailQuery.isLoading ? (
           <LoadingState label="Chargement..." />
@@ -850,6 +1072,7 @@ export function InternalAccountsPage() {
 
             {detailTab === 'overview' ? (
               <form
+                id="internal-account-detail-form"
                 className="page-stack"
                 onSubmit={editForm.handleSubmit(async (values) => {
                   await updateAccountMutation.mutateAsync(values)
@@ -990,38 +1213,6 @@ export function InternalAccountsPage() {
                   ) : null}
                 </div>
 
-                {editForm.formState.isDirty ? (
-                  <div className="button-row operation-edit-actions">
-                    <Button
-                      type="button"
-                      tone="ghost"
-                      disabled={updateAccountMutation.isPending}
-                      onClick={() => {
-                        if (!detailQuery.data) {
-                          return
-                        }
-
-                        editForm.reset({
-                          identifiant: detailQuery.data.identifiant,
-                          libelle: detailQuery.data.libelle ?? '',
-                          codeTypeFonctionnement: detailQuery.data.typeFonctionnement.code,
-                          dateSoldeInitial: detailQuery.data.dateSoldeInitial,
-                          montantSoldeInitial: toMoneyInput(detailQuery.data.montantSoldeInitialEnCentimes),
-                          dateCloture: detailQuery.data.dateCloture ?? '',
-                          nomBanque: detailQuery.data.banque?.nom ?? '',
-                          nomsTitulaires: detailQuery.data.titulaires.map((item) => item.nom),
-                        })
-                        setEditDateClotureOpen(false)
-                      }}
-                    >
-                      Annuler
-                    </Button>
-                    <Button type="submit" disabled={updateAccountMutation.isPending}>
-                      <Save size={16} />
-                      Modifier
-                    </Button>
-                  </div>
-                ) : null}
               </form>
             ) : null}
 
@@ -1122,6 +1313,57 @@ export function InternalAccountsPage() {
                 </div>
               )
             ) : null}
+
+            <div className="detail-footer-actions">
+              <div className="detail-footer-primary">
+                {detailTab === 'overview' && editForm.formState.isDirty ? (
+                  <>
+                    <Button
+                      type="button"
+                      tone="ghost"
+                      disabled={updateAccountMutation.isPending}
+                      onClick={() => {
+                        if (!detailQuery.data) {
+                          return
+                        }
+
+                        editForm.reset({
+                          identifiant: detailQuery.data.identifiant,
+                          libelle: detailQuery.data.libelle ?? '',
+                          codeTypeFonctionnement: detailQuery.data.typeFonctionnement.code,
+                          dateSoldeInitial: detailQuery.data.dateSoldeInitial,
+                          montantSoldeInitial: toMoneyInput(detailQuery.data.montantSoldeInitialEnCentimes),
+                          dateCloture: detailQuery.data.dateCloture ?? '',
+                          nomBanque: detailQuery.data.banque?.nom ?? '',
+                          nomsTitulaires: detailQuery.data.titulaires.map((item) => item.nom),
+                        })
+                        setEditDateClotureOpen(false)
+                      }}
+                    >
+                      Annuler
+                    </Button>
+                    <Button type="submit" form="internal-account-detail-form" disabled={updateAccountMutation.isPending}>
+                      <Save size={16} />
+                      Modifier
+                    </Button>
+                  </>
+                ) : null}
+              </div>
+              <Button
+                type="button"
+                tone="danger"
+                className="detail-delete-button"
+                disabled={deleteAccountMutation.isPending}
+                onClick={() => {
+                  if (selectedId && window.confirm(`Supprimer ${selectedAccountTitle} ?`)) {
+                    void deleteAccountMutation.mutateAsync()
+                  }
+                }}
+              >
+                <Trash2 size={16} />
+                Supprimer
+              </Button>
+            </div>
           </>
         )}
       </OverlayPanel>
