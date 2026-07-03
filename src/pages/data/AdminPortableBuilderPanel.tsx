@@ -21,6 +21,7 @@ function jobBadge(job: PortableBuildJob | null) {
 export function AdminPortableBuilderPanel() {
   const [jobId, setJobId] = useState<string | null>(null)
   const [outputRootDraft, setOutputRootDraft] = useState<string | null>(null)
+  const [backRootDraft, setBackRootDraft] = useState<string | null>(null)
   const [includeData, setIncludeData] = useState(false)
   const [lastStatusCheck, setLastStatusCheck] = useState<string | null>(null)
 
@@ -32,13 +33,18 @@ export function AdminPortableBuilderPanel() {
   })
 
   const startMutation = useMutation({
-    mutationFn: () => portableBuilderApi.startBuild({ outputRoot: outputRoot.trim(), includeData }),
+    mutationFn: () => portableBuilderApi.startBuild({ outputRoot: outputRoot.trim(), backRoot: backRoot.trim(), includeData }),
     onSuccess: (job) => setJobId(job.id),
   })
 
   const selectDirectoryMutation = useMutation({
     mutationFn: () => portableBuilderApi.selectOutputDirectory(outputRoot.trim() || statusQuery.data?.defaultOutputDirectory || ''),
     onSuccess: ({ outputRoot }) => setOutputRootDraft(outputRoot),
+  })
+
+  const selectBackDirectoryMutation = useMutation({
+    mutationFn: () => portableBuilderApi.selectBackDirectory(backRoot.trim() || statusQuery.data?.backRoot || ''),
+    onSuccess: ({ backRoot }) => setBackRootDraft(backRoot),
   })
 
   const exportMutation = useMutation({
@@ -62,18 +68,30 @@ export function AdminPortableBuilderPanel() {
   })
 
   const status = statusQuery.data
-  const outputRoot = outputRootDraft ?? status?.defaultOutputDirectory ?? ''
-  const currentJob = exportMutation.data?.id === jobId ? exportMutation.data : jobQuery.data ?? startMutation.data ?? null
   const serviceUnavailable = statusQuery.isError
+  const outputRoot = outputRootDraft ?? status?.defaultOutputDirectory ?? ''
+  const backRoot = backRootDraft ?? status?.backRoot ?? ''
+
+  const backInspectionQuery = useQuery({
+    queryKey: ['portable-builder', 'back-directory', backRoot],
+    queryFn: () => portableBuilderApi.inspectBackDirectory(backRoot.trim()),
+    enabled: Boolean(!serviceUnavailable && backRoot.trim()),
+    retry: false,
+    refetchInterval: (query) => (query.state.error ? false : 5000),
+  })
+
+  const currentJob = exportMutation.data?.id === jobId ? exportMutation.data : jobQuery.data ?? startMutation.data ?? null
   const buildBusy = Boolean(status?.busy || currentJob?.status === 'queued' || currentJob?.status === 'running' || startMutation.isPending)
-  const actionBusy = Boolean(buildBusy || selectDirectoryMutation.isPending || exportMutation.isPending)
-  const dataCopyBlocked = Boolean(includeData && (status?.backServiceRunning || !status?.backDataDirectoryExists))
-  const canBuild = Boolean(!serviceUnavailable && status?.ok && status.jdkReady && outputRoot.trim() && !actionBusy && !dataCopyBlocked)
+  const actionBusy = Boolean(buildBusy || selectDirectoryMutation.isPending || selectBackDirectoryMutation.isPending || exportMutation.isPending)
+  const backInspection = backInspectionQuery.data
+  const backRootReady = Boolean(backInspection?.valid && !backInspectionQuery.isError)
+  const dataCopyBlocked = Boolean(includeData && (backInspection?.backServiceRunning || !backInspection?.backDataDirectoryExists || backInspectionQuery.isError))
+  const canBuild = Boolean(!serviceUnavailable && status?.ok && status.jdkReady && outputRoot.trim() && backRootReady && !actionBusy && !dataCopyBlocked)
   const canExport = Boolean(!serviceUnavailable && currentJob?.status === 'success' && currentJob.outputPath && outputRoot.trim() && !actionBusy)
   const canDownload = Boolean(!serviceUnavailable && currentJob?.status === 'success' && currentJob.outputPath && !buildBusy)
 
   async function refreshStatus() {
-    await statusQuery.refetch()
+    await Promise.all([statusQuery.refetch(), backRoot.trim() ? backInspectionQuery.refetch() : Promise.resolve()])
     setLastStatusCheck(new Date().toLocaleTimeString('fr-FR'))
   }
 
@@ -100,7 +118,7 @@ export function AdminPortableBuilderPanel() {
             </span>
             <div>
               <strong>Créer MONATIS portable</strong>
-              <span>Le service local utilise le dossier indique puis produit Monatis.exe avec le front, le back et le runtime Java.</span>
+              <span>Le service local compile le back choisi puis produit Monatis.exe avec le front et le runtime Java.</span>
             </div>
             {status?.jdkReady ? <Badge tone="success">JDK OK</Badge> : <Badge tone="warning">JDK requis</Badge>}
           </div>
@@ -114,15 +132,26 @@ export function AdminPortableBuilderPanel() {
               <strong>{status?.port ?? 8095}</strong>
               <small>Port 127.0.0.1</small>
             </span>
-            <span data-help="Dossier propose par defaut quand la fenetre de choix du dossier de sortie s'ouvre.">
-              <strong>{status?.defaultOutputDirectory ?? 'Téléchargements'}</strong>
-              <small>Dossier d'export proposé</small>
+            <span data-help="Etat du dossier back choisi. Il doit contenir le pom.xml et le wrapper Maven du back MONATIS.">
+              <strong>{backInspectionQuery.isError ? 'Invalide' : backInspection?.valid ? 'Valide' : 'A vérifier'}</strong>
+              <small>Back choisi</small>
             </span>
-            <span data-help="Etat de la base locale du back actif. Elle ne peut etre copiee que si le dossier data existe et si le back n'est pas lance.">
-              <strong>{status?.backDataDirectoryExists ? (status.backServiceRunning ? 'Back actif' : 'Disponible') : 'Absente'}</strong>
+            <span data-help="Etat de la base locale du back choisi. Elle ne peut etre copiee que si le dossier data existe et si le back n'est pas lance.">
+              <strong>{backInspection?.backDataDirectoryExists ? (backInspection.backServiceRunning ? 'Back actif' : 'Disponible') : 'Absente'}</strong>
               <small>Base locale</small>
             </span>
           </div>
+
+          <label className="admin-portable-output-field" data-help="Dossier du back : dossier source contenant pom.xml et mvnw.cmd. C'est ce back qui sera compile et embarque dans le portable.">
+            <span>Dossier du back</span>
+            <input
+              value={backRoot}
+              onChange={(event) => setBackRootDraft(event.target.value)}
+              placeholder={status?.backRoot ?? 'C:\\chemin\\vers\\MonatisBack-main'}
+              disabled={actionBusy}
+            />
+            <small>Choisis le dossier racine du back à empaqueter, même s'il n'a pas le nom `MonatisBack-main`.</small>
+          </label>
 
           <label className="admin-portable-output-field" data-help="Dossier d'export : chemin absolu ou le microservice copiera le dossier MonatisPortable apres un build reussi.">
             <span>Dossier d'export</span>
@@ -142,7 +171,7 @@ export function AdminPortableBuilderPanel() {
             </span>
             <span>
               <strong>Inclure la base actuelle</strong>
-              <small>{status?.backDataDirectory ?? 'MonatisBack-main\\data'}</small>
+              <small>{backInspection?.backDataDirectory ?? (backRoot ? `${backRoot}\\data` : 'Dossier du back\\data')}</small>
             </span>
           </label>
 
@@ -166,7 +195,27 @@ export function AdminPortableBuilderPanel() {
             </div>
           ) : null}
 
-          {includeData && status?.backServiceRunning ? (
+          {backInspectionQuery.error ? (
+            <div className="admin-portable-warning">
+              <AlertTriangle size={17} aria-hidden />
+              <div>
+                <strong>Back non utilisable</strong>
+                <span>{backInspectionQuery.error.message}</span>
+              </div>
+            </div>
+          ) : null}
+
+          {selectBackDirectoryMutation.error ? (
+            <div className="admin-portable-warning">
+              <AlertTriangle size={17} aria-hidden />
+              <div>
+                <strong>Dossier back non sélectionné</strong>
+                <span>{selectBackDirectoryMutation.error.message}</span>
+              </div>
+            </div>
+          ) : null}
+
+          {includeData && backInspection?.backServiceRunning ? (
             <div className="admin-portable-warning">
               <AlertTriangle size={17} aria-hidden />
               <div>
@@ -176,12 +225,12 @@ export function AdminPortableBuilderPanel() {
             </div>
           ) : null}
 
-          {includeData && status && !status.backDataDirectoryExists ? (
+          {includeData && backInspection && !backInspection.backDataDirectoryExists ? (
             <div className="admin-portable-warning">
               <AlertTriangle size={17} aria-hidden />
               <div>
                 <strong>Base locale introuvable</strong>
-                <span>Le dossier `data` du back n'a pas été trouvé : {status.backDataDirectory}</span>
+                <span>Le dossier `data` du back n'a pas été trouvé : {backInspection.backDataDirectory}</span>
               </div>
             </div>
           ) : null}
@@ -229,12 +278,22 @@ export function AdminPortableBuilderPanel() {
             <Button
               type="button"
               tone="soft"
+              onClick={() => selectBackDirectoryMutation.mutate()}
+              disabled={serviceUnavailable || actionBusy}
+              data-help="Ouvre un choix de dossier Windows pour choisir le back MONATIS a compiler et embarquer."
+            >
+              {selectBackDirectoryMutation.isPending ? <LoaderCircle className="spin" size={16} /> : <FolderOpen size={16} />}
+              Choisir back
+            </Button>
+            <Button
+              type="button"
+              tone="soft"
               onClick={() => selectDirectoryMutation.mutate()}
               disabled={serviceUnavailable || actionBusy}
               data-help="Ouvre un choix de dossier Windows pour definir la cible d'export. Le dossier choisi remplit le champ ci-dessus."
             >
               {selectDirectoryMutation.isPending ? <LoaderCircle className="spin" size={16} /> : <FolderOpen size={16} />}
-              Choisir dossier
+              Choisir export
             </Button>
             <Button
               type="button"
@@ -279,6 +338,7 @@ export function AdminPortableBuilderPanel() {
             <div>
               <strong>{currentJob?.phase ?? 'Aucun build lancé'}</strong>
               <span>{currentJob ? `${currentJob.progress}% - ${currentJob.status}` : 'Les logs apparaissent ici pendant la création.'}</span>
+              {currentJob?.backRoot ? <span>Back : {currentJob.backRoot}</span> : null}
               {currentJob?.includeData ? <span>Base actuelle incluse dans ce build.</span> : null}
             </div>
           </div>

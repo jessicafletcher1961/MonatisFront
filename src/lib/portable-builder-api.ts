@@ -7,6 +7,7 @@ export interface PortableBuilderStatus {
   port: number
   frontRoot: string
   backRoot: string
+  defaultBackRoot: string
   javaHome: string | null
   jdkReady: boolean
   busy: boolean
@@ -26,6 +27,7 @@ export interface PortableBuildJob {
   createdAt: string
   updatedAt: string
   outputRoot: string
+  backRoot: string
   includeData: boolean
   outputPath: string | null
   exportPath: string | null
@@ -39,11 +41,24 @@ interface PortableBuildJobResponse {
 
 interface PortableBuildRequest {
   outputRoot: string
+  backRoot: string
   includeData: boolean
 }
 
 interface PortableOutputDirectoryResponse {
   outputRoot: string
+}
+
+interface PortableBackDirectoryResponse {
+  backRoot: string
+}
+
+export interface PortableBackInspection {
+  valid: boolean
+  backRoot: string
+  backDataDirectory: string
+  backDataDirectoryExists: boolean
+  backServiceRunning: boolean
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -92,6 +107,26 @@ export const portableBuilderApi = {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ outputRoot }),
+    })
+  },
+
+  selectBackDirectory(backRoot: string): Promise<PortableBackDirectoryResponse> {
+    return requestJson<PortableBackDirectoryResponse>('/api/select-back-directory', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ backRoot }),
+    })
+  },
+
+  inspectBackDirectory(backRoot: string): Promise<PortableBackInspection> {
+    return requestJson<PortableBackInspection>('/api/inspect-back-directory', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ backRoot }),
     })
   },
 

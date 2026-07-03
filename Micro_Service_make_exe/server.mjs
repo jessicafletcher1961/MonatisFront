@@ -13,7 +13,7 @@ const HOST = '127.0.0.1'
 const SERVICE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const FRONT_ROOT = path.resolve(SERVICE_DIR, '..')
 const MONATIS_ROOT = path.resolve(FRONT_ROOT, '..')
-const BACK_ROOT = path.resolve(process.env.MONATIS_BACK_ROOT ?? path.join(MONATIS_ROOT, 'MonatisBack-main'))
+const DEFAULT_BACK_ROOT = path.resolve(process.env.MONATIS_BACK_ROOT ?? path.join(MONATIS_ROOT, 'MonatisBack-main'))
 const WORK_ROOT = path.join(SERVICE_DIR, 'work')
 const MAX_LOG_LINES = 900
 
@@ -29,6 +29,10 @@ function isWindows() {
 
 function commandName(command) {
   return isWindows() ? `${command}.cmd` : command
+}
+
+function mavenWrapperName() {
+  return isWindows() ? 'mvnw.cmd' : 'mvnw'
 }
 
 function toolPath(javaHome, command) {
@@ -104,7 +108,7 @@ function text(res, status, body) {
   res.end(body)
 }
 
-function createJob(outputRoot, includeData = false) {
+function createJob(outputRoot, backRoot, includeData = false) {
   const id = randomUUID()
   const job = {
     id,
@@ -114,6 +118,7 @@ function createJob(outputRoot, includeData = false) {
     createdAt: now(),
     updatedAt: now(),
     outputRoot,
+    backRoot,
     includeData,
     outputPath: null,
     exportPath: null,
@@ -135,6 +140,7 @@ function jobView(job) {
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
     outputRoot: job.outputRoot,
+    backRoot: job.backRoot,
     includeData: job.includeData,
     outputPath: job.outputPath,
     exportPath: job.exportPath,
@@ -184,8 +190,8 @@ async function isBackServiceRunning() {
   }
 }
 
-async function hasBackDataDirectory() {
-  const dataDir = path.join(BACK_ROOT, 'data')
+async function hasBackDataDirectory(backRoot) {
+  const dataDir = path.join(backRoot, 'data')
   try {
     const stat = await fs.stat(dataDir)
     return stat.isDirectory()
@@ -304,6 +310,45 @@ async function resolveOutputRoot(value) {
   return resolved
 }
 
+async function resolveBackRoot(value) {
+  const requested = typeof value === 'string' && value.trim() ? value.trim() : DEFAULT_BACK_ROOT
+  if (!path.isAbsolute(requested)) {
+    throw new Error('Le dossier du back doit etre un chemin absolu.')
+  }
+
+  const resolved = path.resolve(requested)
+  const stat = await fs.stat(resolved).catch((error) => {
+    if (error?.code === 'ENOENT') {
+      throw new Error(`Le dossier du back est introuvable: ${resolved}`)
+    }
+    throw error
+  })
+
+  if (!stat.isDirectory()) {
+    throw new Error(`Le chemin du back n'est pas un dossier: ${resolved}`)
+  }
+
+  const wrapper = path.join(resolved, mavenWrapperName())
+  const pom = path.join(resolved, 'pom.xml')
+  if (!(await exists(wrapper)) || !(await exists(pom))) {
+    throw new Error(`Le dossier choisi ne ressemble pas au back MONATIS: ${resolved}`)
+  }
+
+  return resolved
+}
+
+function existingDirectoryFallback(value) {
+  const requested = typeof value === 'string' && value.trim() ? value.trim() : DEFAULT_BACK_ROOT
+  const resolved = path.resolve(requested)
+  if (existsSync(resolved)) {
+    return resolved
+  }
+  if (existsSync(DEFAULT_BACK_ROOT)) {
+    return DEFAULT_BACK_ROOT
+  }
+  return MONATIS_ROOT
+}
+
 async function selectOutputDirectory(value) {
   let fallback
   try {
@@ -341,6 +386,40 @@ exit 2
   })
 
   return resolveOutputRoot(selected)
+}
+
+async function selectBackDirectory(value) {
+  const fallback = existingDirectoryFallback(value)
+  if (!isWindows()) {
+    return resolveBackRoot(fallback)
+  }
+
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = "Choisir le dossier du back MONATIS a empaqueter"
+$dialog.ShowNewFolderButton = $false
+if (Test-Path -LiteralPath $env:MONATIS_BACK_ROOT) {
+  $dialog.SelectedPath = $env:MONATIS_BACK_ROOT
+}
+$result = $dialog.ShowDialog()
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+  Write-Output $dialog.SelectedPath
+  exit 0
+}
+exit 2
+`
+
+  const selected = await runCapture('powershell.exe', ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+    env: {
+      ...process.env,
+      MONATIS_BACK_ROOT: fallback,
+    },
+  })
+
+  return resolveBackRoot(selected)
 }
 
 async function uniqueExportFolder(outputRoot, stamp) {
@@ -397,8 +476,8 @@ async function hasRequiredJavaTools(javaHome) {
   )
 }
 
-async function findBackJar() {
-  const targetDir = path.join(BACK_ROOT, 'target')
+async function findBackJar(backRoot) {
+  const targetDir = path.join(backRoot, 'target')
   const entries = await fs.readdir(targetDir, { withFileTypes: true })
   const jars = []
 
@@ -703,13 +782,12 @@ Si Windows affiche SmartScreen, c'est attendu pour un executable local non signe
 async function runBuild(job) {
   updateJob(job, { status: 'running', phase: 'Verification des pre-requis', progress: 5 })
   await ensureDir(WORK_ROOT)
+  const backRoot = await resolveBackRoot(job.backRoot)
 
   if (!(await exists(FRONT_ROOT)) || !(await exists(path.join(FRONT_ROOT, 'package.json')))) {
     throw new Error(`Front introuvable: ${FRONT_ROOT}`)
   }
-  if (!(await exists(BACK_ROOT)) || !(await exists(path.join(BACK_ROOT, 'mvnw.cmd')))) {
-    throw new Error(`Back introuvable ou mvnw.cmd absent: ${BACK_ROOT}`)
-  }
+  log(job, `Back utilise: ${backRoot}`)
 
   const javaHome = await detectJavaHome()
   if (!javaHome) {
@@ -740,14 +818,14 @@ async function runBuild(job) {
   })
 
   updateJob(job, { phase: 'Build du back', progress: 35 })
-  await runProcess(job, path.join(BACK_ROOT, 'mvnw.cmd'), ['clean', 'package', '-Dmaven.test.skip=true'], {
-    cwd: BACK_ROOT,
+  await runProcess(job, path.join(backRoot, mavenWrapperName()), ['clean', 'package', '-Dmaven.test.skip=true'], {
+    cwd: backRoot,
     logFile: buildLog,
   })
 
-  const builtBackJar = await findBackJar()
+  const builtBackJar = await findBackJar(backRoot)
   if (!builtBackJar) {
-    throw new Error('Aucun jar back trouve dans MonatisBack-main/target.')
+    throw new Error(`Aucun jar back trouve dans ${path.join(backRoot, 'target')}.`)
   }
   log(job, `Jar back detecte: ${builtBackJar}`)
 
@@ -790,15 +868,18 @@ async function runBuild(job) {
   await ensureRuntimeJavaExecutable(javaHome, internalFolder, job)
   await ensureDir(path.join(internalFolder, 'data'))
   await ensureDir(path.join(internalFolder, 'logs'))
-  await copyDirectoryIfExists(path.join(BACK_ROOT, 'sauvegardes'), path.join(internalFolder, 'sauvegardes'), job, 'Sauvegardes')
-  await copyDirectoryIfExists(path.join(BACK_ROOT, 'echanges'), path.join(internalFolder, 'echanges'), job, 'Echanges')
+  await copyDirectoryIfExists(path.join(backRoot, 'sauvegardes'), path.join(internalFolder, 'sauvegardes'), job, 'Sauvegardes')
+  await copyDirectoryIfExists(path.join(backRoot, 'echanges'), path.join(internalFolder, 'echanges'), job, 'Echanges')
 
   const shouldIncludeData = job.includeData || process.env.MONATIS_PORTABLE_COPY_DATA === '1'
   if (shouldIncludeData) {
     if (await isBackServiceRunning()) {
       throw new Error('Base H2 non copiee: le back local repond encore sur 127.0.0.1:8082. Arrete le back avant de creer un portable avec la base actuelle.')
     }
-    await copyDirectoryIfExists(path.join(BACK_ROOT, 'data'), path.join(internalFolder, 'data'), job, 'Base H2')
+    if (!(await hasBackDataDirectory(backRoot))) {
+      throw new Error(`Base H2 demandee mais dossier data introuvable: ${path.join(backRoot, 'data')}`)
+    }
+    await copyDirectoryIfExists(path.join(backRoot, 'data'), path.join(internalFolder, 'data'), job, 'Base H2')
   } else {
     log(job, 'Base H2: non copiee par defaut. Le portable creera ou utilisera sa propre base dans data/.')
   }
@@ -882,11 +963,16 @@ async function startBuild(req, res) {
   }
 
   let outputRoot
+  let backRoot
   let includeData = false
   try {
     const payload = await readJson(req)
     outputRoot = await resolveOutputRoot(payload.outputRoot)
+    backRoot = await resolveBackRoot(payload.backRoot)
     includeData = payload.includeData === true
+    if (includeData && !(await hasBackDataDirectory(backRoot))) {
+      throw new Error(`Le dossier data du back choisi est introuvable: ${path.join(backRoot, 'data')}`)
+    }
     if (includeData && (await isBackServiceRunning())) {
       throw new Error('Arrete le back local sur 127.0.0.1:8082 avant de copier la base H2 dans le portable.')
     }
@@ -895,7 +981,7 @@ async function startBuild(req, res) {
     return
   }
 
-  const job = createJob(outputRoot, includeData)
+  const job = createJob(outputRoot, backRoot, includeData)
   json(res, 202, { job: jobView(job) })
   runBuild(job).catch((error) => {
     updateJob(job, {
@@ -919,6 +1005,36 @@ async function chooseOutputDirectory(req, res) {
   }
 }
 
+async function chooseBackDirectory(req, res) {
+  try {
+    const payload = await readJson(req)
+    const backRoot = await selectBackDirectory(payload.backRoot)
+    json(res, 200, { backRoot })
+  } catch (error) {
+    json(res, error?.code === 2 ? 400 : 500, {
+      message: error?.code === 2 ? 'Selection du dossier annulee.' : error.message,
+    })
+  }
+}
+
+async function inspectBackDirectory(req, res) {
+  try {
+    const payload = await readJson(req)
+    const backRoot = await resolveBackRoot(payload.backRoot)
+    const backDataDirectory = path.join(backRoot, 'data')
+    const [backServiceRunning, backDataDirectoryExists] = await Promise.all([isBackServiceRunning(), hasBackDataDirectory(backRoot)])
+    json(res, 200, {
+      valid: true,
+      backRoot,
+      backDataDirectory,
+      backDataDirectoryExists,
+      backServiceRunning,
+    })
+  } catch (error) {
+    json(res, 400, { message: error.message })
+  }
+}
+
 async function handleRequest(req, res) {
   if (req.method === 'OPTIONS') {
     json(res, 204, {})
@@ -929,15 +1045,16 @@ async function handleRequest(req, res) {
 
   if (req.method === 'GET' && url.pathname === '/api/status') {
     const javaHome = await detectJavaHome()
-    const backDataDirectory = path.join(BACK_ROOT, 'data')
-    const [backServiceRunning, backDataDirectoryExists] = await Promise.all([isBackServiceRunning(), hasBackDataDirectory()])
+    const backDataDirectory = path.join(DEFAULT_BACK_ROOT, 'data')
+    const [backServiceRunning, backDataDirectoryExists] = await Promise.all([isBackServiceRunning(), hasBackDataDirectory(DEFAULT_BACK_ROOT)])
     json(res, 200, {
       ok: true,
       service: 'monatis-portable-builder',
       host: HOST,
       port: PORT,
       frontRoot: FRONT_ROOT,
-      backRoot: BACK_ROOT,
+      backRoot: DEFAULT_BACK_ROOT,
+      defaultBackRoot: DEFAULT_BACK_ROOT,
       javaHome,
       jdkReady: Boolean(javaHome),
       busy: [...jobs.values()].some((job) => job.status === 'queued' || job.status === 'running'),
@@ -956,6 +1073,16 @@ async function handleRequest(req, res) {
 
   if (req.method === 'POST' && url.pathname === '/api/select-output-directory') {
     await chooseOutputDirectory(req, res)
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/select-back-directory') {
+    await chooseBackDirectory(req, res)
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/inspect-back-directory') {
+    await inspectBackDirectory(req, res)
     return
   }
 
@@ -1016,5 +1143,5 @@ const server = createServer((req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`MONATIS portable builder listening on http://${HOST}:${PORT}`)
   console.log(`Front root: ${FRONT_ROOT}`)
-  console.log(`Back root: ${BACK_ROOT}`)
+  console.log(`Default back root: ${DEFAULT_BACK_ROOT}`)
 })

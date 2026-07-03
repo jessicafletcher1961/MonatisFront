@@ -19,27 +19,33 @@ Le service ecoute uniquement sur `127.0.0.1:8095`.
 - Node.js disponible pour lancer ce service.
 - Un JDK complet disponible dans `JAVA_HOME`, `MONATIS_JAVA_HOME` ou dans le `PATH`.
 - Le JDK doit fournir `javac`, `jar` et `jpackage`.
-- Le dossier back doit rester a cote du dossier front : `../MonatisBack-main`.
+- Le dossier back peut être choisi depuis l'interface. Par défaut, le service propose `../MonatisBack-main` ou la variable `MONATIS_BACK_ROOT`.
+- Le dossier back choisi doit contenir `pom.xml` et le wrapper Maven du back (`mvnw.cmd` sous Windows).
 
 ## Fonctionnement
 
 Quand le front appelle `POST /api/build-portable`, le service construit d'abord une image portable interne dans `Micro_Service_make_exe/work/{jobId}` :
 
 - le front avec `VITE_MONATIS_API_URL` vide pour utiliser les appels API relatifs ;
-- le back Spring Boot via `mvnw.cmd clean package -Dmaven.test.skip=true` ;
+- le back Spring Boot choisi via `mvnw.cmd clean package -Dmaven.test.skip=true` ;
 - un jar back portable enrichi avec le `dist/` du front dans `BOOT-INF/classes/static` ;
 - un petit lanceur Java dont toutes les classes compilees sont empaquetees avant l'appel a `jpackage` ;
 - une image portable contenant `Monatis.exe`, `runtime/`, `app/`, `data/`, `sauvegardes/`, `echanges/` et `logs/`.
 - `runtime/bin/java.exe` et `Lancer-Monatis.bat` comme lanceur de secours lorsque le launcher natif Windows ne trouve pas la JVM.
 
-Le JSON de création accepte `includeData: true`. Dans ce cas, le service copie aussi `MonatisBack-main/data` vers le dossier `data/` du portable. Le back local doit être arrêté avant la copie ; si le service répond encore sur `127.0.0.1:8082`, la création est refusée pour éviter une copie incohérente de H2.
+Le JSON de création accepte `backRoot` et `includeData: true`. `backRoot` est le chemin absolu du back à compiler ; s'il est absent, le service utilise `MONATIS_BACK_ROOT` ou `../MonatisBack-main`. Quand `includeData` vaut `true`, le service copie aussi `{backRoot}/data` vers le dossier `data/` du portable. Le back local doit être arrêté avant la copie ; si le service répond encore sur `127.0.0.1:8082`, la création est refusée pour éviter une copie incohérente de H2.
 
 Cette image interne reste dans le dossier de travail tant que le job est conserve en memoire. L'interface propose ensuite deux actions separees :
 
 - `POST /api/build-portable/jobs/{id}/export` copie l'image vers le dossier absolu choisi dans l'interface ;
 - `GET /api/build-portable/jobs/{id}/download` genere puis telecharge une archive ZIP de l'image.
 
-Le choix de dossier utilise `POST /api/select-output-directory`, qui ouvre une fenetre Windows de selection de dossier quand le service tourne sous Windows. Le champ texte reste disponible pour saisir un chemin absolu manuellement.
+Le choix de dossier utilise deux routes :
+
+- `POST /api/select-back-directory` ouvre une fenetre Windows pour choisir le back à compiler ;
+- `POST /api/select-output-directory` ouvre une fenetre Windows pour choisir le dossier d'export.
+
+Les champs texte restent disponibles pour saisir des chemins absolus manuellement.
 
 Sur Windows, les scripts `npm.cmd` et `mvnw.cmd` sont lances via `cmd.exe /d /s /c` pour rester compatibles avec Node 22 et les postes ou `spawn` direct sur un fichier `.cmd` renvoie `EINVAL`.
 
