@@ -51,7 +51,7 @@ Le choix de dossier utilise deux routes :
 
 Les champs texte restent disponibles pour saisir des chemins absolus manuellement.
 
-Sur Windows, les scripts `npm.cmd` et `mvnw.cmd` sont lances via `cmd.exe /d /s /c` pour rester compatibles avec Node 22 et les postes ou `spawn` direct sur un fichier `.cmd` renvoie `EINVAL`.
+Sur Windows, les scripts `npm.cmd` et `mvnw.cmd` sont lances via `cmd.exe /d /s /c` pour rester compatibles avec Node 22 et les postes ou `spawn` direct sur un fichier `.cmd` renvoie `EINVAL`. Le lancement de `mvnw.cmd` reçoit aussi `JAVA_HOME`, `JDK_HOME` et un `PATH` préfixé par le JDK détecté ou embarqué ; le back peut donc compiler même si la machine n'a pas de variable Java configurée.
 
 La base H2 courante n'est pas copiee par defaut pour eviter une copie incoherente si elle est ouverte. Cocher `Inclure la base actuelle` dans l'interface pour la copier dans le package. La variable `MONATIS_PORTABLE_COPY_DATA=1` reste disponible pour forcer cette copie hors interface.
 

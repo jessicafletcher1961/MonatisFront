@@ -71,6 +71,18 @@ function processInvocation(command, args) {
   }
 }
 
+function javaProcessEnv(javaHome, baseEnv = process.env) {
+  const pathKey = Object.keys(baseEnv).find((key) => key.toLowerCase() === 'path') ?? 'PATH'
+  const currentPath = baseEnv[pathKey]
+
+  return {
+    ...baseEnv,
+    JAVA_HOME: javaHome,
+    JDK_HOME: javaHome,
+    [pathKey]: [path.join(javaHome, 'bin'), currentPath].filter(Boolean).join(path.delimiter),
+  }
+}
+
 function json(res, status, payload) {
   const body = JSON.stringify(payload)
   res.writeHead(status, {
@@ -949,6 +961,7 @@ async function runBuild(job) {
   await runProcess(job, path.join(backRoot, mavenWrapperName()), ['clean', 'package', '-Dmaven.test.skip=true'], {
     cwd: backRoot,
     logFile: buildLog,
+    env: javaProcessEnv(javaHome),
   })
 
   const builtBackJar = await findBackJar(backRoot)
