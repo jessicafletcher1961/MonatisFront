@@ -5,6 +5,8 @@ import { createReadStream, createWriteStream, existsSync } from 'node:fs'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 
@@ -15,6 +17,11 @@ const FRONT_ROOT = path.resolve(SERVICE_DIR, '..')
 const MONATIS_ROOT = path.resolve(FRONT_ROOT, '..')
 const DEFAULT_BACK_ROOT = path.resolve(process.env.MONATIS_BACK_ROOT ?? path.join(MONATIS_ROOT, 'MonatisBack-main'))
 const WORK_ROOT = path.join(SERVICE_DIR, 'work')
+const TOOLS_ROOT = path.join(SERVICE_DIR, 'tools')
+const BUNDLED_JDK_ROOT = path.join(TOOLS_ROOT, 'jdk')
+const JDK_DOWNLOAD_URL =
+  process.env.MONATIS_JDK_DOWNLOAD_URL ??
+  'https://api.adoptium.net/v3/binary/latest/21/ga/windows/x64/jdk/hotspot/normal/eclipse?project=jdk'
 const MAX_LOG_LINES = 900
 
 const jobs = new Map()
@@ -202,7 +209,11 @@ async function hasBackDataDirectory(backRoot) {
 
 function runProcess(job, command, args, options = {}) {
   return new Promise((resolve, reject) => {
-    log(job, `> ${command} ${args.join(' ')}`)
+    if (job) {
+      log(job, `> ${command} ${args.join(' ')}`)
+    } else {
+      console.log(`> ${command} ${args.join(' ')}`)
+    }
     const invocation = processInvocation(command, args)
     const child = spawn(invocation.command, invocation.args, {
       cwd: options.cwd,
@@ -219,7 +230,11 @@ function runProcess(job, command, args, options = {}) {
       for (const rawLine of textValue.split(/\r?\n/)) {
         const line = rawLine.trim()
         if (line) {
-          log(job, line)
+          if (job) {
+            log(job, line)
+          } else {
+            console.log(line)
+          }
         }
       }
     }
@@ -441,13 +456,122 @@ async function copyDirectoryRobust(source, target, job, label) {
   log(job, `${label}: copie terminee vers ${target}.`)
 }
 
-async function detectJavaHome() {
-  const candidates = [process.env.MONATIS_JAVA_HOME, process.env.JAVA_HOME].filter(Boolean)
+async function findBundledJavaHome() {
+  const candidates = [BUNDLED_JDK_ROOT]
+
+  try {
+    const entries = await fs.readdir(BUNDLED_JDK_ROOT, { withFileTypes: true })
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        candidates.push(path.join(BUNDLED_JDK_ROOT, entry.name))
+      }
+    }
+  } catch {
+    // The bundled JDK directory is optional. It can be downloaded on demand.
+  }
 
   for (const candidate of candidates) {
-    if (candidate && (await hasRequiredJavaTools(candidate))) {
+    if (await hasRequiredJavaTools(candidate)) {
       return path.resolve(candidate)
     }
+  }
+
+  return null
+}
+
+async function installBundledJdk(job = null) {
+  if (!isWindows()) {
+    return null
+  }
+
+  const existing = await findBundledJavaHome()
+  if (existing) {
+    return existing
+  }
+
+  const downloadDir = path.join(WORK_ROOT, 'jdk-download')
+  const zipPath = path.join(downloadDir, 'jdk.zip')
+  const extractDir = path.join(downloadDir, 'extract')
+  await ensureDir(downloadDir)
+  await fs.rm(zipPath, { force: true })
+  await fs.rm(extractDir, { recursive: true, force: true })
+
+  if (job) {
+    log(job, 'JDK embarque introuvable: telechargement automatique du JDK portable.')
+  }
+
+  const response = await fetch(JDK_DOWNLOAD_URL, {
+    headers: {
+      'User-Agent': 'monatis-portable-builder',
+    },
+  })
+  if (!response.ok || !response.body) {
+    throw new Error(`Telechargement du JDK impossible: HTTP ${response.status}`)
+  }
+
+  await pipeline(Readable.fromWeb(response.body), createWriteStream(zipPath))
+  await ensureDir(extractDir)
+  await runProcess(
+    job,
+    'powershell.exe',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'Expand-Archive -LiteralPath $env:MONATIS_JDK_ZIP -DestinationPath $env:MONATIS_JDK_EXTRACT -Force'],
+    {
+      env: {
+        ...process.env,
+        MONATIS_JDK_ZIP: zipPath,
+        MONATIS_JDK_EXTRACT: extractDir,
+      },
+    },
+  )
+
+  const extractedCandidates = []
+  const entries = await fs.readdir(extractDir, { withFileTypes: true })
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      extractedCandidates.push(path.join(extractDir, entry.name))
+    }
+  }
+  extractedCandidates.unshift(extractDir)
+
+  const extractedJdk = await findFirstJavaHome(extractedCandidates)
+  if (!extractedJdk) {
+    throw new Error('Le JDK telecharge ne contient pas javac, jar et jpackage.')
+  }
+
+  await fs.rm(BUNDLED_JDK_ROOT, { recursive: true, force: true })
+  await ensureDir(path.dirname(BUNDLED_JDK_ROOT))
+  await fs.cp(extractedJdk, BUNDLED_JDK_ROOT, { recursive: true, force: true })
+  await fs.rm(downloadDir, { recursive: true, force: true })
+
+  const installed = await findBundledJavaHome()
+  if (!installed) {
+    throw new Error(`Installation du JDK embarque incomplete: ${BUNDLED_JDK_ROOT}`)
+  }
+
+  if (job) {
+    log(job, `JDK embarque installe: ${installed}`)
+  }
+  return installed
+}
+
+async function findFirstJavaHome(candidates) {
+  for (const candidate of candidates.filter(Boolean)) {
+    if (await hasRequiredJavaTools(candidate)) {
+      return path.resolve(candidate)
+    }
+  }
+
+  return null
+}
+
+async function detectJavaHome(options = {}) {
+  const explicitJavaHome = process.env.MONATIS_JAVA_HOME
+  const bundledJavaHome = await findBundledJavaHome()
+  const candidates = [explicitJavaHome, bundledJavaHome, process.env.JAVA_HOME].filter(Boolean)
+
+  const configured = await findFirstJavaHome(candidates)
+  if (configured) {
+    return configured
   }
 
   if (isWindows()) {
@@ -460,8 +584,12 @@ async function detectJavaHome() {
         }
       }
     } catch {
-      return null
+      // PATH lookup is optional; the bundled JDK installer can still be used.
     }
+  }
+
+  if (options.installBundled === true) {
+    return installBundledJdk(options.job ?? null)
   }
 
   return null
@@ -789,9 +917,9 @@ async function runBuild(job) {
   }
   log(job, `Back utilise: ${backRoot}`)
 
-  const javaHome = await detectJavaHome()
+  const javaHome = await detectJavaHome({ installBundled: true, job })
   if (!javaHome) {
-    throw new Error('JDK complet introuvable. Definir MONATIS_JAVA_HOME ou JAVA_HOME avec javac, jar et jpackage.')
+    throw new Error('JDK complet introuvable. Le telechargement automatique du JDK embarque a echoue.')
   }
   log(job, `JDK utilise: ${javaHome}`)
 
@@ -921,7 +1049,7 @@ async function createArchive(job) {
     return archivePath
   }
 
-  const javaHome = await detectJavaHome()
+  const javaHome = await detectJavaHome({ installBundled: true, job })
   if (!javaHome) {
     throw new Error('JDK complet introuvable. Impossible de generer le ZIP.')
   }
@@ -1045,6 +1173,7 @@ async function handleRequest(req, res) {
 
   if (req.method === 'GET' && url.pathname === '/api/status') {
     const javaHome = await detectJavaHome()
+    const bundledJavaHome = await findBundledJavaHome()
     const backDataDirectory = path.join(DEFAULT_BACK_ROOT, 'data')
     const [backServiceRunning, backDataDirectoryExists] = await Promise.all([isBackServiceRunning(), hasBackDataDirectory(DEFAULT_BACK_ROOT)])
     json(res, 200, {
@@ -1057,6 +1186,10 @@ async function handleRequest(req, res) {
       defaultBackRoot: DEFAULT_BACK_ROOT,
       javaHome,
       jdkReady: Boolean(javaHome),
+      bundledJavaHome,
+      bundledJdkDirectory: BUNDLED_JDK_ROOT,
+      bundledJdkReady: Boolean(bundledJavaHome),
+      jdkAutoInstallAvailable: isWindows(),
       busy: [...jobs.values()].some((job) => job.status === 'queued' || job.status === 'running'),
       defaultOutputDirectory: path.join(os.homedir(), 'Downloads'),
       backServiceRunning,

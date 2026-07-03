@@ -17,8 +17,10 @@ Le service ecoute uniquement sur `127.0.0.1:8095`.
 ## Pre-requis
 
 - Node.js disponible pour lancer ce service.
-- Un JDK complet disponible dans `JAVA_HOME`, `MONATIS_JAVA_HOME` ou dans le `PATH`.
-- Le JDK doit fournir `javac`, `jar` et `jpackage`.
+- Un JDK complet est nécessaire, mais il n'a pas besoin d'être configuré sur la machine.
+- Le service cherche d'abord `MONATIS_JAVA_HOME`, puis `tools/jdk`, `JAVA_HOME` et le `PATH`.
+- Si aucun JDK n'est trouvé sous Windows, le premier build télécharge automatiquement un JDK portable dans `tools/jdk`.
+- Le JDK utilisé doit fournir `javac`, `jar` et `jpackage`.
 - Le dossier back peut être choisi depuis l'interface. Par défaut, le service propose `../MonatisBack-main` ou la variable `MONATIS_BACK_ROOT`.
 - Le dossier back choisi doit contenir `pom.xml` et le wrapper Maven du back (`mvnw.cmd` sous Windows).
 
@@ -32,6 +34,8 @@ Quand le front appelle `POST /api/build-portable`, le service construit d'abord 
 - un petit lanceur Java dont toutes les classes compilees sont empaquetees avant l'appel a `jpackage` ;
 - une image portable contenant `Monatis.exe`, `runtime/`, `app/`, `data/`, `sauvegardes/`, `echanges/` et `logs/`.
 - `runtime/bin/java.exe` et `Lancer-Monatis.bat` comme lanceur de secours lorsque le launcher natif Windows ne trouve pas la JVM.
+
+Le JDK embarqué est stocké dans `tools/jdk`. Copier ce dossier avec le front permet de relancer la création portable sur une autre machine sans configurer de variable d'environnement. Si ce dossier est absent, le service le recrée automatiquement au premier build tant que la machine a accès à l'URL `MONATIS_JDK_DOWNLOAD_URL` ou à l'URL Adoptium configurée par défaut.
 
 Le JSON de création accepte `backRoot` et `includeData: true`. `backRoot` est le chemin absolu du back à compiler ; s'il est absent, le service utilise `MONATIS_BACK_ROOT` ou `../MonatisBack-main`. Quand `includeData` vaut `true`, le service copie aussi `{backRoot}/data` vers le dossier `data/` du portable. Le back local doit être arrêté avant la copie ; si le service répond encore sur `127.0.0.1:8082`, la création est refusée pour éviter une copie incohérente de H2.
 

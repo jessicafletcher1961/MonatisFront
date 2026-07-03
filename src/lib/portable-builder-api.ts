@@ -10,6 +10,10 @@ export interface PortableBuilderStatus {
   defaultBackRoot: string
   javaHome: string | null
   jdkReady: boolean
+  bundledJavaHome: string | null
+  bundledJdkDirectory: string
+  bundledJdkReady: boolean
+  jdkAutoInstallAvailable: boolean
   busy: boolean
   defaultOutputDirectory: string
   backServiceRunning: boolean

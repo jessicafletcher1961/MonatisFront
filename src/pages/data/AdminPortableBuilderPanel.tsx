@@ -85,8 +85,9 @@ export function AdminPortableBuilderPanel() {
   const actionBusy = Boolean(buildBusy || selectDirectoryMutation.isPending || selectBackDirectoryMutation.isPending || exportMutation.isPending)
   const backInspection = backInspectionQuery.data
   const backRootReady = Boolean(backInspection?.valid && !backInspectionQuery.isError)
+  const jdkUsable = Boolean(status?.jdkReady || status?.jdkAutoInstallAvailable)
   const dataCopyBlocked = Boolean(includeData && (backInspection?.backServiceRunning || !backInspection?.backDataDirectoryExists || backInspectionQuery.isError))
-  const canBuild = Boolean(!serviceUnavailable && status?.ok && status.jdkReady && outputRoot.trim() && backRootReady && !actionBusy && !dataCopyBlocked)
+  const canBuild = Boolean(!serviceUnavailable && status?.ok && jdkUsable && outputRoot.trim() && backRootReady && !actionBusy && !dataCopyBlocked)
   const canExport = Boolean(!serviceUnavailable && currentJob?.status === 'success' && currentJob.outputPath && outputRoot.trim() && !actionBusy)
   const canDownload = Boolean(!serviceUnavailable && currentJob?.status === 'success' && currentJob.outputPath && !buildBusy)
 
@@ -120,7 +121,7 @@ export function AdminPortableBuilderPanel() {
               <strong>Créer MONATIS portable</strong>
               <span>Le service local compile le back choisi puis produit Monatis.exe avec le front et le runtime Java.</span>
             </div>
-            {status?.jdkReady ? <Badge tone="success">JDK OK</Badge> : <Badge tone="warning">JDK requis</Badge>}
+            {status?.jdkReady ? <Badge tone="success">JDK OK</Badge> : status?.jdkAutoInstallAvailable ? <Badge tone="warning">JDK auto</Badge> : <Badge tone="warning">JDK requis</Badge>}
           </div>
 
           <div className="admin-portable-status-grid">
@@ -185,12 +186,22 @@ export function AdminPortableBuilderPanel() {
             </div>
           ) : null}
 
-          {!serviceUnavailable && status && !status.jdkReady ? (
+          {!serviceUnavailable && status && !status.jdkReady && status.jdkAutoInstallAvailable ? (
+            <div className="admin-portable-warning">
+              <AlertTriangle size={17} aria-hidden />
+              <div>
+                <strong>JDK embarqué absent</strong>
+                <span>Le premier build installera automatiquement un JDK portable dans `{status.bundledJdkDirectory}`.</span>
+              </div>
+            </div>
+          ) : null}
+
+          {!serviceUnavailable && status && !status.jdkReady && !status.jdkAutoInstallAvailable ? (
             <div className="admin-portable-warning">
               <AlertTriangle size={17} aria-hidden />
               <div>
                 <strong>JDK complet introuvable</strong>
-                <span>Définis `MONATIS_JAVA_HOME` ou `JAVA_HOME` vers un JDK avec javac, jar et jpackage.</span>
+                <span>Cette plateforme ne permet pas l'installation automatique du JDK embarqué.</span>
               </div>
             </div>
           ) : null}

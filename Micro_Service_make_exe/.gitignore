@@ -1,2 +1,5 @@
 work/
 *.log
+tools/jdk/
+tools/*.zip
+tools/jdk-download/
