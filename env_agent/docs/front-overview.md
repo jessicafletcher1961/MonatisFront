@@ -30,6 +30,16 @@ Les rapports sont calculés côté front à partir des opérations, comptes, ré
 
 Le tableau de bord charge aussi les comptes techniques, emprunts et évaluations pour signaler la couverture du back enrichi.
 
+## Identité visuelle
+
+La barre haute affiche le logo MONATIS normalisé en WebP dans `src/assets/icons/monatis/brand/monatis-logo.webp`. Le clic sur la marque revient à l'aperçu.
+
+La navigation haute reste compacte : marque, liens de section, bouton d'aide, bouton clair/sombre et menu mobile tiennent sur une seule barre réduite. Les routes n'affichent pas de titre de page redondant au-dessus du contenu ; les onglets, filtres et panneaux visibles portent le contexte réel de l'écran.
+
+Le thème clair/sombre est piloté par les variables CSS de `src/index.css` et le choix est stocké dans `localStorage` sous `monatis-theme`. Les deux modes utilisent les mêmes rôles de couleur : accent principal, bleu, violet, corail, or, positif, alerte et danger. Les graphiques utilisent Recharts et les variables `--chart-1` à `--chart-12` pour garder des couleurs stables et lisibles dans les deux thèmes. Dans un même graphique, les couleurs sont attribuées de manière déterministe par libellé afin d'éviter que deux données différentes partagent la même teinte quand la palette le permet.
+
+Les graphiques des synthèses `/analyse` et `/donnees` proposent un sélecteur local de forme quand plusieurs rendus sont pertinents : camembert, anneau, barres, colonnes, treemap, pont, courbe, aire, flux, heatmap, bulles, jauge d'exécution ou entonnoir. Ce sélecteur est présenté sous forme d'icônes compactes ; le mode aide décrit le rôle de chaque forme au survol. La préférence est conservée par emplacement dans `localStorage` avec la clé `monatis-chart:{chartId}`.
+
 ## Mode aide
 
 La barre de navigation contient un bouton `?` placé juste avant le bouton clair/sombre. Il active le mode aide global.

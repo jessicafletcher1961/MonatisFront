@@ -88,13 +88,13 @@ export function TechnicalAccountOverview({ summary }: TechnicalAccountOverviewPr
         <section className="technical-breakdown-panel">
           <div className="technical-panel-head">
             <div>
-              <span>Repartition par type</span>
+              <span>Flux par type</span>
               <strong>{summary.typeBreakdown.length} type{summary.typeBreakdown.length > 1 ? 's' : ''}</strong>
             </div>
             <DatabaseZap size={18} aria-hidden />
           </div>
           {summary.typeBreakdown.length === 0 ? (
-            <EmptyState title="Aucun type" description="La repartition apparaitra apres les premieres operations rattachees." />
+            <EmptyState title="Aucun type" description="L'analyse par type apparaitra apres les premieres operations rattachees." />
           ) : (
             <div className="technical-breakdown-list">
               {summary.typeBreakdown.map((item) => {

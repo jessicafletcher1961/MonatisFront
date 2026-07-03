@@ -14,6 +14,10 @@
 
 Chaque panneau est isolé dans `src/pages/data/`. Les sous-composants des budgets et emprunts vivent aussi dans ce dossier pour éviter de concentrer les formulaires, calculs d'affichage et sections de détail dans un seul fichier.
 
+Les synthèses de ces panneaux utilisent `src/components/insight.tsx`, comme les rapports. L'objectif est une lecture homogène mais non répétitive : valeur principale, quatre indicateurs maximum, puis une visualisation adaptée au domaine lorsque cela apporte une décision plus rapide. Les graphiques proposent plusieurs formes quand c'est utile et conservent la préférence utilisateur par emplacement. Les KPI ne répètent pas la valeur principale ; ils décrivent le périmètre, l'état, la qualité ou les volumes.
+
+La mise en page de `/donnees` est volontairement plus verticale que les écrans de saisie rapides. `DataPage.tsx` ajoute le scope `data-workspace-stage`; `src/index.css` l'utilise pour espacer les panneaux, placer les filtres sur des lignes séparées quand le contenu est dense, et transformer les listes en lignes de décision lisibles sur plusieurs niveaux. Les actions restent visibles mais ne doivent pas forcer les métriques, badges et libellés à tenir sur une seule ligne.
+
 ## Budgets
 
 `BudgetsPanel.tsx` couvre les budgets par bénéficiaire, par catégorie et par sous-catégorie. Il orchestre les requêtes et mutations ; `BudgetDashboard.tsx` porte la synthèse et l'explication du mode de rattachement ; `BudgetList.tsx` porte les filtres et lignes ; `BudgetForm.tsx` porte le formulaire commun de création et de modification ; `budget-panel-utils.ts` porte les libellés, filtres, statuts temporels et prévisualisations de période ; `budget-execution.ts` porte le filtrage par nature de référence et le calcul d'avancement à partir des opérations.
@@ -29,9 +33,10 @@ Le back retourne actuellement tous les budgets depuis chaque route `/monatis/bud
 L'écran affiche une synthèse des budgets actifs :
 
 - entrées réalisées sur objectif d'entrées ;
-- sorties consommées sur limite de sorties ;
-- disponible restant sur les limites de sorties ;
+- objectif de sorties et budgets actifs ;
 - alertes de rythme ou dépassement sur les budgets actifs.
+
+Le tableau de bord ajoute une jauge d'exécution des sorties : réalisé, cible, reste disponible ou dépassement. Cette visualisation peut aussi être affichée en barres détaillées ou en camembert selon la préférence locale. Le détail par budget reste dans la liste.
 
 L'avancement est calculé côté front à partir de `/monatis/operations/all`. Seules les lignes d'opérations `RECETTE` et `DEPENSE` sont prises en compte, comme dans le rapport dépense/recette du back. Une ligne est rattachée :
 
@@ -58,7 +63,7 @@ Le détail reprend le bandeau de navigation des autres cadres, ajoute un résum�
 
 `LoansPanel.tsx` orchestre la liste, le détail, la création, la modification et la suppression d'emprunts. Un emprunt est associé à un compte interne, possède un libellé, une date de départ, une durée et une ou plusieurs conditions.
 
-L'écran reprend une logique de suivi de prêt : `LoanDashboard.tsx` affiche la synthèse du portefeuille, `LoanList.tsx` affiche les emprunts sous forme de lignes de décision avec capital initial, taux, durée, compte et révisions, `LoanOverview.tsx` affiche dans le détail le capital remboursé, le restant dû théorique, la prochaine échéance, le coût intérêts + frais et la période d'échéancier. Les calculs de synthèse et de progression vivent dans `loan-summary-utils.ts`.
+L'écran reprend une logique de suivi de prêt : `LoanDashboard.tsx` affiche la synthèse du portefeuille, les révisions, les conditions, le taux et la durée moyenne, puis une visualisation en bulles qui croise capital, taux et durée. Cette visualisation peut aussi être affichée en treemap ou en barres selon la préférence locale. `LoanList.tsx` affiche les emprunts sous forme de lignes de décision avec capital initial, taux, durée, compte et révisions. `LoanOverview.tsx` affiche dans le détail le capital remboursé, le restant dû théorique, la prochaine échéance, le coût intérêts + frais et la période d'échéancier. Les calculs de synthèse et de progression vivent dans `loan-summary-utils.ts`.
 
 `LoanConditionEditor.tsx` édite les conditions d'emprunt : dates, taux, capital emprunté, assurance, période d'échéances, nombre d'échéances et montant fixe facultatif.
 
@@ -70,7 +75,7 @@ La liste `/monatis/emprunts/all` ne contient pas l'échéancier complet. Le suiv
 
 `TechnicalAccountsPanel.tsx` gère les comptes techniques utilisés comme contreparties des flux intrinsèques, corrections, frais, rémunérations et revalorisations. Ces comptes n'ont pas de solde propre exposé par le back ; le front calcule leur usage à partir des opérations.
 
-- `TechnicalAccountsDashboard.tsx` consolide le nombre de comptes, les comptes utilisés, le solde net technique, les rémunérations, les frais/charges et les flux non techniques à vérifier.
+- `TechnicalAccountsDashboard.tsx` consolide le nombre de comptes, les comptes utilisés, le solde net technique, les flux techniques reconnus, les flux non techniques à vérifier et une visualisation rémunérations / frais affichable en flux, barre empilée, barres ou camembert.
 - `TechnicalAccountsList.tsx` affiche les comptes sous forme de lignes de suivi avec état `Utilisé`, `Dormant` ou `A vérifier`.
 - Les filtres permettent de chercher dans l'identifiant, le libellé et les opérations rattachées, puis de limiter l'affichage aux comptes utilisés, dormants ou à vérifier.
 - `TechnicalAccountOverview.tsx` affiche le détail d'usage : solde net technique, flux techniques, rémunérations, frais, flux récents et répartition par type d'opération.
@@ -91,7 +96,7 @@ Endpoints utilisés :
 
 `EvaluationsPanel.tsx` gère les points de valeur des comptes internes. Une évaluation sert de point d'ancrage aux calculs de solde et de patrimoine dans les rapports.
 
-- `EvaluationDashboard.tsx` consolide les dernières évaluations par compte interne : valeur nette, actifs suivis, dettes évaluées, comptes couverts et comptes à actualiser.
+- `EvaluationDashboard.tsx` consolide les dernières évaluations par compte interne : valeur nette, actifs suivis, dettes évaluées, taux de couverture, comptes à actualiser et valeur par type de compte affichable en treemap, anneau ou barres.
 - `EvaluationList.tsx` propose deux vues : dernier point par compte et historique complet. Elle filtre par recherche libre et par type de compte interne (`COURANT`, `FINANCIER`, `BIEN`).
 - Chaque ligne affiche le compte, la valeur, la date et la variation par rapport au point précédent du même compte.
 - `EvaluationOverview.tsx` affiche le détail d'un point : valeur, variation précédente, intervalle, écart avec le solde initial et historique récent du compte.
@@ -111,7 +116,7 @@ Endpoints utilisés :
 
 `ImportRulesPanel.tsx` administre les règles actives apprises pendant l'import de relevés. Ces règles servent à reconnaître une ligne de relevé par clé normalisée et rôle du compte externe, puis à proposer le type d'opération, la contrepartie, la sous-catégorie et les bénéficiaires lors d'un prochain import similaire.
 
-- `ImportRulesDashboard.tsx` synthétise le nombre de règles actives, les utilisations cumulées, les règles limitées à un compte interne, les règles sans usage ou incomplètes et la répartition par type d'opération.
+- `ImportRulesDashboard.tsx` synthétise le nombre de règles actives, les utilisations cumulées, les règles limitées à un compte interne, les règles sans usage ou incomplètes, puis une visualisation de qualité des règles affichable en entonnoir, anneau, barres ou treemap. Les types d'opération restent lisibles dans la liste et le détail.
 - `ImportRulesList.tsx` affiche les règles sous forme de lignes lisibles avec clé normalisée, type appliqué, rôle du compte externe, compte externe, compte interne de contexte, catégorie, bénéficiaires, usages et état `Prête`, `Sans usage` ou `A compléter`.
 - Les filtres permettent de chercher librement, puis de limiter l'affichage à toutes les règles, aux règles prêtes, incomplètes, jamais réutilisées ou contextuelles à un compte interne.
 - `ImportRuleOverview.tsx` détaille le routage appris, la signature de reconnaissance et la complétude de la règle.
@@ -128,7 +133,7 @@ Endpoints utilisés :
 
 `TypologiesPanel.tsx` affiche en lecture seule toutes les familles de typologies exposées par le back : fonctionnement, compte, opération, période, budget, programmation et référence. Le panneau orchestre uniquement le chargement et l'état de recherche ; les calculs et libellés vivent dans `typology-utils.ts`.
 
-- `TypologyDashboard.tsx` synthétise le volume de valeurs exposées, le nombre de familles, les types d'opération, les flux techniques et la famille la plus dense.
+- `TypologyDashboard.tsx` synthétise le volume de valeurs exposées, le nombre de familles, les types d'opération, les flux techniques, la famille la plus dense et le volume par famille affichable en treemap, barres ou anneau.
 - `TypologyExplorer.tsx` sert d'explorateur : recherche par code, libellé ou libellé court, sélection d'une famille, filtres par flags opération (`Flux techniques`, `Flux métier`, `Catégorisables`, `Non catégorisables`) et liste détaillée des valeurs.
 - Les flags `libelleCourt`, `fluxTechnique` et `categorisable` ne sont présents que lorsque le back les renvoie, notamment sur les types d'opération.
 - L'écran ne crée, modifie ni supprime aucune typologie. Ces valeurs sont des enums back, utilisées par les formulaires, les budgets, les emprunts, les imports et les rapports.
@@ -137,10 +142,11 @@ Endpoints utilisés :
 
 `AdminPanel.tsx` orchestre les outils bas niveau exposés par le back. L'écran est découpé pour distinguer les lectures sûres, les actions de transfert et les actions critiques.
 
-- `AdminDashboard.tsx` affiche une synthèse : exports CSV disponibles, sauvegardes détectées, répertoire `echanges`, actions critiques et dernière action lancée dans la session.
+- `AdminDashboard.tsx` affiche une synthèse : exports CSV disponibles, sauvegardes détectées, répertoire `echanges`, actions critiques, dernière action lancée dans la session et visualisation séparant consultation, transfert et actions sensibles, affichable en entonnoir, anneau ou barres.
 - `AdminCsvExports.tsx` regroupe les téléchargements CSV directs pour comptes, opérations, budgets et types d'opération. Ces actions ouvrent les URLs `csvDownloadUrl` dans un nouvel onglet et ne modifient pas les données.
 - `AdminBackupsPanel.tsx` permet de créer une sauvegarde dans `sauvegardes`, de voir les archives listées par le back et de préparer une restauration. La restauration demande confirmation avant appel.
 - `AdminExchangePanel.tsx` couvre les actions du répertoire `echanges` : export d'une table vers CSV, import d'un CSV dans une table et création d'opérations depuis un CSV déjà présent côté back.
 - `AdminDangerZone.tsx` isole l'exécution de script SQL et la vidange. L'exécution de script demande confirmation ; la vidange demande aussi de saisir `VIDANGER` avant de pouvoir déclencher l'appel.
+- `AdminPortableBuilderPanel.tsx` affiche l'état du microservice `Micro_Service_make_exe`, vérifie la présence d'un JDK complet et permet de créer une image portable Windows. Le build se fait d'abord dans le dossier de travail du microservice ; l'utilisateur peut ensuite choisir un dossier d'export, copier l'image vers ce dossier ou télécharger un ZIP. La case `Inclure la base actuelle` copie le dossier `data` du back dans le portable seulement si le back local est arrêté. Cette section ne consomme pas le back métier et ne modifie pas ses sources.
 
 Le back expose ces commandes en `GET`; le front ne change pas ce contrat et compense par des libellés explicites, un regroupement par niveau de risque et des confirmations côté interface.

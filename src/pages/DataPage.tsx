@@ -1,7 +1,7 @@
 import { Archive, Banknote, Calculator, DatabaseZap, FileDown, Landmark, ListTree } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 
-import { PageHeader, SegmentedControl, Surface } from '../components/ui'
+import { SegmentedControl, Surface } from '../components/ui'
 import { AdminPanel } from './data/AdminPanel'
 import { BudgetsPanel } from './data/BudgetsPanel'
 import { EvaluationsPanel } from './data/EvaluationsPanel'
@@ -41,9 +41,7 @@ export function DataPage() {
   const view = normalizeDataView(searchParams.get('view'))
 
   return (
-    <div className="page-stack">
-      <PageHeader eyebrow="Donnees" title="Couverture back" subtitle="Budgets, emprunts, comptes techniques, evaluations, imports, typologies et outils CSV/admin." />
-
+    <div className="page-stack data-page-stack">
       <Surface className="workspace-switcher">
         <SegmentedControl
           items={dataOptions}
@@ -54,7 +52,7 @@ export function DataPage() {
         />
       </Surface>
 
-      <div className="workspace-stage">
+      <div className="workspace-stage data-workspace-stage">
         {view === 'budgets' ? <BudgetsPanel /> : null}
         {view === 'emprunts' ? <LoansPanel /> : null}
         {view === 'techniques' ? <TechnicalAccountsPanel /> : null}

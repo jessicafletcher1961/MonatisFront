@@ -4,6 +4,8 @@
 
 `OperationsPage.tsx` affiche les opérations paginées. Le mode simple utilise `POST /monatis/operations/page`.
 
+Les actions `Importer relevé` et `Nouvelle opération` sont intégrées à la première ligne du panneau d'historique, avec les filtres, afin de garder les commandes principales dans le cadre qu'elles pilotent.
+
 Quand l'utilisateur active des filtres nécessitant une logique front, la page charge toutes les pages disponibles avec une taille interne de 200, puis filtre et trie côté front.
 
 Les filtres courants couvrent :

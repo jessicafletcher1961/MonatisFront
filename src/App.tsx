@@ -5,6 +5,7 @@ import { NavLink, Route, Routes, useLocation } from 'react-router-dom'
 
 import { HelpModeOverlay } from './components/help-mode'
 import { Button, LoadingState } from './components/ui'
+import monatisLogo from './assets/icons/monatis/brand/monatis-logo.webp'
 import { cx } from './lib/cx'
 
 const DashboardPage = lazy(() => import('./pages/DashboardPage').then((module) => ({ default: module.DashboardPage })))
@@ -56,7 +57,15 @@ export default function App() {
     <div className={cx('app-shell', helpMode && 'help-mode-active')}>
       <header className="shell-header">
         <div className="shell-bar">
-          <div className="shell-balance" aria-hidden="true" />
+          <NavLink to="/" end className="brand-pill" data-help="Logo MONATIS : revient a l'apercu general de l'application.">
+            <span className="brand-mark" aria-hidden="true">
+              <img src={monatisLogo} alt="" />
+            </span>
+            <span className="brand-copy">
+              <strong>MONATIS</strong>
+              <span>Finance personnelle</span>
+            </span>
+          </NavLink>
 
           <nav className={cx('shell-nav', navOpen && 'open')}>
             {navigation.map((item) => {

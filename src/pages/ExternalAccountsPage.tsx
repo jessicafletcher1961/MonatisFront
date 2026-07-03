@@ -7,7 +7,7 @@ import { z } from 'zod'
 
 import { DEFAULT_CATALOG_PAGE_SIZE } from '../components/pagination-constants'
 import { CatalogPaginationControls } from '../components/pagination-controls'
-import { Button, EmptyState, ErrorState, FormField, LoadingState, OverlayPanel, PageHeader, Surface } from '../components/ui'
+import { Button, EmptyState, ErrorState, FormField, LoadingState, OverlayPanel, Surface } from '../components/ui'
 import { cx } from '../lib/cx'
 import { apiErrorMessage, monatisApi } from '../lib/monatis-api'
 import { nullIfBlank } from '../lib/format'
@@ -135,23 +135,6 @@ export function ExternalAccountsPage() {
 
   return (
     <div className="page-stack">
-      <PageHeader
-        eyebrow="Comptes"
-        title="Externes"
-        actions={
-          <Button
-            tone="soft"
-            onClick={() => {
-              setCreateOpen(true)
-              setSelectedId(null)
-            }}
-          >
-            <Plus size={16} />
-            Nouveau
-          </Button>
-        }
-      />
-
       {accountsQuery.isLoading && !accountsQuery.data ? <LoadingState label="Chargement des comptes externes..." /> : null}
       {hasError ? <ErrorState message={apiErrorMessage(hasError)} /> : null}
 
@@ -169,6 +152,18 @@ export function ExternalAccountsPage() {
                 placeholder="Rechercher un compte externe..."
               />
             </label>
+            <div className="catalog-primary-actions">
+              <Button
+                tone="soft"
+                onClick={() => {
+                  setCreateOpen(true)
+                  setSelectedId(null)
+                }}
+              >
+                <Plus size={16} />
+                Nouveau
+              </Button>
+            </div>
 
             <CatalogPaginationControls
               ariaLabel="Pagination des comptes externes haut"

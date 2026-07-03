@@ -1,11 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
-import { BarChart3, Check, ChevronDown, ChevronLeft, ChevronRight, Landmark, ListFilter, PiggyBank, Search, TrendingUp, Wallet } from 'lucide-react'
-import type { ReactNode } from 'react'
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
+import { BarChart3, Check, ChevronDown, Landmark, ListFilter, PiggyBank, Search, TrendingUp, Wallet } from 'lucide-react'
+import { useDeferredValue, useMemo, useState } from 'react'
 
-import { Badge, Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, PageHeader, SectionHeader, Surface } from '../components/ui'
+import { Button, EmptyState, ErrorState, FilterBar, FormField, LoadingState, OverlayPanel, Surface } from '../components/ui'
 import { cx } from '../lib/cx'
-import { formatCurrency, formatDate, todayIso, type MonatisPeriodCode } from '../lib/format'
+import { todayIso, type MonatisPeriodCode } from '../lib/format'
 import { apiErrorMessage, monatisApi } from '../lib/monatis-api'
 import {
   buildAccountLookup,
@@ -15,13 +14,23 @@ import {
   buildReleveCompte,
   buildRemunerationsFraisReport,
   buildResumesComptes,
-  describePeriod,
-  type ReleveRow,
 } from '../lib/reporting'
+import { BilanDashboard } from './reports/BilanDashboard'
+import { BilanGroupsPanel } from './reports/BilanGroupsPanel'
+import { ReleveDashboard } from './reports/ReleveDashboard'
+import { ReleveMovementsPanel, type ReleveMode } from './reports/ReleveMovementsPanel'
+import { DepenseRecetteCategoriesPanel } from './reports/DepenseRecetteCategoriesPanel'
+import { DepenseRecetteDashboard } from './reports/DepenseRecetteDashboard'
+import { PlusMoinsDashboard } from './reports/PlusMoinsDashboard'
+import { PlusMoinsGroupsPanel } from './reports/PlusMoinsGroupsPanel'
+import { RemunerationsDashboard } from './reports/RemunerationsDashboard'
+import { RemunerationsGroupsPanel } from './reports/RemunerationsGroupsPanel'
+import { ResumeDashboard } from './reports/ResumeDashboard'
+import { ResumeGroupsPanel } from './reports/ResumeGroupsPanel'
+import { buildResumeGroups } from './reports/resume-report-utils'
 
 type ReportTab = 'releve' | 'resumes' | 'depense' | 'plusmoins' | 'remunerations' | 'bilan'
 type PeriodSelectValue = Exclude<MonatisPeriodCode, null | undefined>
-type ReleveMode = 'both' | 'recettes' | 'depenses'
 type ReportFilterPicker =
   | 'releve-account'
   | 'releve-date'
@@ -68,50 +77,10 @@ const periodOptions: Array<{ value: PeriodSelectValue; label: string }> = [
   { value: 'ANNEE', label: 'Annee' },
 ]
 
-const RELEVE_PAGE_SIZE_OPTIONS = [25, 50, 100, 200]
-
-function visibleRelevePageRows(rows: ReleveRow[], currentPage: number, pageSize: number, totalCount: number | null): ReleveRow[] {
-  if (rows.length <= pageSize && totalCount != null && totalCount > rows.length) {
-    return rows
-  }
-
-  const start = Math.max(0, (currentPage - 1) * pageSize)
-  return rows.slice(start, start + pageSize)
-}
+const DEFAULT_RELEVE_PAGE_SIZE = 25
 
 function toggleValue(values: string[], nextValue: string): string[] {
   return values.includes(nextValue) ? values.filter((value) => value !== nextValue) : [...values, nextValue]
-}
-
-function isSectionOpen(state: Record<string, boolean>, key: string): boolean {
-  return state[key] ?? false
-}
-
-function toggleSectionState(state: Record<string, boolean>, key: string): Record<string, boolean> {
-  return {
-    ...state,
-    [key]: !(state[key] ?? false),
-  }
-}
-
-function sumPeriodSolde(periods: Array<{ solde: number }>): number {
-  return periods.reduce((total, period) => total + period.solde, 0)
-}
-
-function safeTrailingValue(periods: Array<{ montantSoldeFinalEnEuros: number }>): number {
-  return periods.length ? periods[periods.length - 1].montantSoldeFinalEnEuros : 0
-}
-
-function sumPlusMoinsValue(periods: Array<{ montantPlusMoinsValueNetteEnEuros: number }>): number {
-  return periods.reduce((total, period) => total + period.montantPlusMoinsValueNetteEnEuros, 0)
-}
-
-function reportCellLabel(recette: number, depense: number, depenseLabel = 'D'): string {
-  return `R ${formatCurrency(recette)} / ${depenseLabel} ${formatCurrency(depense)}`
-}
-
-function rateLabel(value: number | null): string {
-  return value == null ? '-' : `${value.toLocaleString('fr-FR', { maximumFractionDigits: 2, minimumFractionDigits: 2 })} %`
 }
 
 function compactFilterLabel(values: string[], emptyLabel: string): string {
@@ -138,112 +107,11 @@ function periodFilterLabel(value: PeriodSelectValue): string {
   return periodOptions.find((option) => option.value === value)?.label ?? 'Vue globale'
 }
 
-function HoverDetailsCard({
-  title,
-  subtitle,
-  items,
-}: {
-  title: string
-  subtitle?: string
-  items: Array<{ primary: string; secondary?: string; amount?: string }>
-}) {
-  return (
-    <div className="report-hover-card">
-      <div className="report-hover-head">
-        <strong>{title}</strong>
-        {subtitle ? <span>{subtitle}</span> : null}
-      </div>
-      <div className="report-hover-list">
-        {items.map((item, index) => (
-          <div key={`${item.primary}-${index}`} className="report-hover-item">
-            <div>
-              <strong>{item.primary}</strong>
-              {item.secondary ? <span>{item.secondary}</span> : null}
-            </div>
-            {item.amount ? <span>{item.amount}</span> : null}
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function InlinePeriodTotals({
-  items,
-}: {
-  items: Array<{ label: string; summary: string }>
-}) {
-  return (
-    <div className="report-inline-summary">
-      {items.map((item) => (
-        <div key={item.label} className="report-inline-summary-item">
-          <strong>{item.label}</strong>
-          <span>{item.summary}</span>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function CollapsibleReportSection({
-  title,
-  aside,
-  open,
-  onToggle,
-  children,
-}: {
-  title: string
-  aside?: ReactNode
-  open: boolean
-  onToggle: () => void
-  children: ReactNode
-}) {
-  const sectionRef = useRef<HTMLDivElement | null>(null)
-  const mountedRef = useRef(false)
-
-  useEffect(() => {
-    if (!mountedRef.current) {
-      mountedRef.current = true
-      return
-    }
-
-    if (!open) {
-      return
-    }
-
-    const frame = window.requestAnimationFrame(() => {
-      sectionRef.current?.scrollIntoView({
-        behavior: 'smooth',
-        block: 'center',
-      })
-    })
-
-    return () => window.cancelAnimationFrame(frame)
-  }, [open])
-
-  return (
-    <Surface className="report-section">
-      <div ref={sectionRef}>
-        <button type="button" className="report-section-toggle" onClick={onToggle}>
-          <div className="report-section-heading">
-            <div className="report-section-title">
-              <ChevronRight size={15} className={cx(open && 'open')} />
-              <strong>{title}</strong>
-            </div>
-            {aside ? <div className="report-section-aside">{aside}</div> : null}
-          </div>
-        </button>
-        {open ? <div className="report-section-body">{children}</div> : null}
-      </div>
-    </Surface>
-  )
-}
-
 export function ReportsPage() {
   const [tab, setTab] = useState<ReportTab>('releve')
   const [releveMode, setReleveMode] = useState<ReleveMode>('both')
   const [reportFilterPicker, setReportFilterPicker] = useState<ReportFilterPicker>(null)
-  const [relevePageSize, setRelevePageSize] = useState(RELEVE_PAGE_SIZE_OPTIONS[0])
+  const [relevePageSize, setRelevePageSize] = useState(DEFAULT_RELEVE_PAGE_SIZE)
   const [releveRecettePage, setReleveRecettePage] = useState(1)
   const [releveDepensePage, setReleveDepensePage] = useState(1)
 
@@ -295,21 +163,15 @@ export function ReportsPage() {
   const [bilanAccountSearch, setBilanAccountSearch] = useState('')
   const [bilanTitulaireSearch, setBilanTitulaireSearch] = useState('')
 
-  const [resumeSections, setResumeSections] = useState<Record<string, boolean>>({})
-  const [depenseSections, setDepenseSections] = useState<Record<string, boolean>>({})
-  const [plusSections, setPlusSections] = useState<Record<string, boolean>>({})
-  const [remSections, setRemSections] = useState<Record<string, boolean>>({})
-  const [bilanSections, setBilanSections] = useState<Record<string, boolean>>({})
-
   function selectTab(nextTab: ReportTab) {
-    setResumeSections({})
-    setDepenseSections({})
-    setPlusSections({})
-    setRemSections({})
-    setBilanSections({})
     setReleveMode('both')
     setReportFilterPicker(null)
     setTab(nextTab)
+  }
+
+  function applySingleChoiceFilter(apply: () => void) {
+    apply()
+    setReportFilterPicker(null)
   }
 
   const deferredReleveAccountSearch = useDeferredValue(releveAccountSearch)
@@ -637,14 +499,6 @@ export function ReportsPage() {
   })
 
   const releve = releveQuery.data ?? null
-  const releveOperationsRecette = useMemo(
-    () => (releve ? visibleRelevePageRows(releve.operationsRecette, releveRecettePage, relevePageSize, releve.totalOperationsRecette) : []),
-    [releve, relevePageSize, releveRecettePage],
-  )
-  const releveOperationsDepense = useMemo(
-    () => (releve ? visibleRelevePageRows(releve.operationsDepense, releveDepensePage, relevePageSize, releve.totalOperationsDepense) : []),
-    [releve, releveDepensePage, relevePageSize],
-  )
   const resumes = useMemo(() => resumesQuery.data ?? [], [resumesQuery.data])
   const depenseReport = depenseReportQuery.data ?? null
   const plusMoinsReport = plusMoinsReportQuery.data ?? null
@@ -692,18 +546,7 @@ export function ReportsPage() {
     activeReportError
 
   const resumeGroups = useMemo(() => {
-    const groups = new Map<string, typeof resumes>()
-    resumes.forEach((row) => {
-      groups.set(row.typeFonctionnement, [...(groups.get(row.typeFonctionnement) ?? []), row])
-    })
-
-    return Array.from(groups.entries())
-      .map(([type, accounts]) => ({
-        type,
-        accounts: [...accounts].sort((left, right) => left.identifiant.localeCompare(right.identifiant)),
-        total: accounts.reduce((sum, account) => sum + account.montantSoldeEnEuros, 0),
-      }))
-      .sort((left, right) => left.type.localeCompare(right.type))
+    return buildResumeGroups(resumes)
   }, [resumes])
 
   const filteredDepenseSousCategories = useMemo(() => {
@@ -752,7 +595,7 @@ export function ReportsPage() {
 
   function renderReportFilterButton(label: string, value: string, picker: Exclude<ReportFilterPicker, null>) {
     return (
-      <button type="button" className="picker-field picker-field-compact operation-filter-button" onClick={() => setReportFilterPicker(picker)}>
+      <button type="button" className="picker-field picker-field-compact operation-filter-button report-filter-button" onClick={() => setReportFilterPicker(picker)}>
         <div className="picker-field-content">
           <span className="operation-filter-button-label">{label}</span>
           <strong>{value}</strong>
@@ -813,70 +656,118 @@ export function ReportsPage() {
     setBilanAccounts([])
   }
 
-  function changeRelevePageSize(value: string) {
-    const nextSize = Number.parseInt(value, 10)
-
-    if (!RELEVE_PAGE_SIZE_OPTIONS.includes(nextSize)) {
-      return
-    }
-
+  function changeRelevePageSize(nextSize: number) {
     setRelevePageSize(nextSize)
     setReleveRecettePage(1)
     setReleveDepensePage(1)
   }
 
-  function renderRelevePaginationControls(type: 'recette' | 'depense', position: 'top' | 'bottom') {
-    if (!releve) {
-      return null
-    }
-
-    const isRecette = type === 'recette'
-    const totalCount = isRecette ? releve.totalOperationsRecette ?? releve.operationsRecette.length : releve.totalOperationsDepense ?? releve.operationsDepense.length
-    const currentPage = isRecette ? releveRecettePage : releveDepensePage
-    const totalPages = isRecette ? releve.totalPagesOperationsRecette ?? (totalCount ? Math.ceil(totalCount / relevePageSize) : 0) : releve.totalPagesOperationsDepense ?? (totalCount ? Math.ceil(totalCount / relevePageSize) : 0)
-    const firstVisible = totalCount ? (currentPage - 1) * relevePageSize + 1 : 0
-    const lastVisible = totalCount ? Math.min(currentPage * relevePageSize, totalCount) : 0
-    const pageLabel = totalCount ? `${currentPage}/${Math.max(totalPages, 1)}` : '0/0'
-    const changePage = isRecette ? setReleveRecettePage : setReleveDepensePage
-
-    return (
-      <div className={cx('catalog-list-controls', 'report-pagination-controls', position === 'bottom' && 'bottom')} aria-label={`Pagination des ${isRecette ? 'recettes' : 'depenses'} ${position === 'bottom' ? 'bas' : 'haut'}`}>
-        <div className="catalog-list-count">
-          <strong>{totalCount ? `${firstVisible}-${lastVisible}` : '0'}</strong>
-          <span>{`sur ${totalCount}`}</span>
-        </div>
-
-        <label className="catalog-page-size">
-          <span>Afficher</span>
-          <select value={relevePageSize} onChange={(event) => changeRelevePageSize(event.target.value)} aria-label="Nombre d'operations affichees dans le releve">
-            {RELEVE_PAGE_SIZE_OPTIONS.map((size) => (
-              <option key={size} value={size}>
-                {size}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <div className="catalog-page-buttons">
-          <button type="button" disabled={!totalCount || currentPage <= 1} onClick={() => changePage(Math.max(1, currentPage - 1))} aria-label="Page precedente">
-            <ChevronLeft size={15} />
-          </button>
-          <span>{pageLabel}</span>
-          <button type="button" disabled={!totalCount || currentPage >= Math.max(totalPages, 1)} onClick={() => changePage(Math.min(Math.max(totalPages, 1), currentPage + 1))} aria-label="Page suivante">
-            <ChevronRight size={15} />
-          </button>
-        </div>
-      </div>
-    )
-  }
-
   const releveFilterControls = (
-    <Surface className="catalog-panel releve-filter-panel">
+    <Surface className="catalog-panel releve-filter-panel" data-help="Filtres du releve : choisis le compte interne et la periode a analyser. Le releve est recalcule immediatement cote front.">
       <div className="operation-filter-stack">
         <div className="operation-filter-row">
-          {renderReportFilterButton('Compte', selectedReleveAccount?.identifiant ?? 'Choisir', 'releve-account')}
           {renderReportFilterButton('Date', dateRangeFilterLabel(releveStart, releveEnd), 'releve-date')}
+          {renderReportFilterButton('Compte', selectedReleveAccount?.identifiant ?? 'Choisir', 'releve-account')}
           <Button type="button" tone="ghost" onClick={resetReleveFilters}>
+            Reinitialiser
+          </Button>
+        </div>
+      </div>
+    </Surface>
+  )
+
+  const resumeFilterControls = (
+    <Surface className="catalog-panel resume-filter-panel" data-help="Filtres du resume : choisis la date de solde, un type de fonctionnement ou une selection de comptes internes.">
+      <div className="operation-filter-stack">
+        <div className="operation-filter-row">
+          {renderReportFilterButton('Date', resumeDate || 'Toutes', 'resume-date')}
+          {renderReportFilterButton('Type', resumeType || 'Tous', 'resume-type')}
+          {renderReportFilterButton(
+            'Compte',
+            compactFilterLabel(selectedResumeAccountItems.map((account) => account.identifiant), 'Tous'),
+            'resume-account',
+          )}
+          <Button type="button" tone="ghost" onClick={resetResumeFilters}>
+            Reinitialiser
+          </Button>
+        </div>
+      </div>
+    </Surface>
+  )
+
+  const depenseFilterControls = (
+    <Surface className="catalog-panel depense-recette-filter-panel" data-help="Filtres depenses recettes : choisis la plage, le decoupage par periode, le beneficiaire et les categories analysees.">
+      <div className="operation-filter-stack">
+        <div className="operation-filter-row">
+          {renderReportFilterButton('Date', dateRangeFilterLabel(depenseStart, depenseEnd), 'depense-date')}
+          {renderReportFilterButton('Periode', periodFilterLabel(depensePeriod), 'depense-period')}
+          {renderReportFilterButton('Beneficiaire', depenseBeneficiaire || 'Tous', 'depense-beneficiary')}
+          {renderReportFilterButton('Categorie', compactFilterLabel(depenseCategories, 'Toutes'), 'depense-category')}
+          {renderReportFilterButton('Sous-categorie', compactFilterLabel(depenseSousCategories, 'Toutes'), 'depense-subcategory')}
+          <Button type="button" tone="ghost" onClick={resetDepenseFilters}>
+            Reinitialiser
+          </Button>
+        </div>
+      </div>
+    </Surface>
+  )
+
+  const plusFilterControls = (
+    <Surface className="catalog-panel plus-moins-filter-panel" data-help="Filtres plus moins-value : choisis la plage, le decoupage, les titulaires, les types et les comptes analyses.">
+      <div className="operation-filter-stack">
+        <div className="operation-filter-row">
+          {renderReportFilterButton('Date', dateRangeFilterLabel(plusStart, plusEnd), 'plus-date')}
+          {renderReportFilterButton('Periode', periodFilterLabel(plusPeriod), 'plus-period')}
+          {renderReportFilterButton('Titulaire', plusTitulaire || 'Tous', 'plus-titulaire')}
+          {renderReportFilterButton('Type', compactFilterLabel(plusTypes, 'Tous'), 'plus-type')}
+          {renderReportFilterButton(
+            'Compte',
+            compactFilterLabel(selectedPlusAccountItems.map((account) => account.identifiant), 'Tous'),
+            'plus-account',
+          )}
+          <Button type="button" tone="ghost" onClick={resetPlusMoinsFilters}>
+            Reinitialiser
+          </Button>
+        </div>
+      </div>
+    </Surface>
+  )
+
+  const remunerationFilterControls = (
+    <Surface className="catalog-panel remunerations-filter-panel" data-help="Filtres remunerations frais : choisis la plage, le decoupage, les titulaires, les types et les comptes analyses.">
+      <div className="operation-filter-stack">
+        <div className="operation-filter-row">
+          {renderReportFilterButton('Date', dateRangeFilterLabel(remStart, remEnd), 'rem-date')}
+          {renderReportFilterButton('Periode', periodFilterLabel(remPeriod), 'rem-period')}
+          {renderReportFilterButton('Titulaire', remTitulaire || 'Tous', 'rem-titulaire')}
+          {renderReportFilterButton('Type', compactFilterLabel(remTypes, 'Tous'), 'rem-type')}
+          {renderReportFilterButton(
+            'Compte',
+            compactFilterLabel(selectedRemAccountItems.map((account) => account.identifiant), 'Tous'),
+            'rem-account',
+          )}
+          <Button type="button" tone="ghost" onClick={resetRemunerationFilters}>
+            Reinitialiser
+          </Button>
+        </div>
+      </div>
+    </Surface>
+  )
+
+  const bilanFilterControls = (
+    <Surface className="catalog-panel bilan-filter-panel" data-help="Filtres bilan patrimoine : choisis la plage, le decoupage, les titulaires, les types et les comptes analyses.">
+      <div className="operation-filter-stack">
+        <div className="operation-filter-row">
+          {renderReportFilterButton('Date', dateRangeFilterLabel(bilanStart, bilanEnd), 'bilan-date')}
+          {renderReportFilterButton('Periode', periodFilterLabel(bilanPeriod), 'bilan-period')}
+          {renderReportFilterButton('Titulaire', bilanTitulaire || 'Tous', 'bilan-titulaire')}
+          {renderReportFilterButton('Type', compactFilterLabel(bilanTypes, 'Tous'), 'bilan-type')}
+          {renderReportFilterButton(
+            'Compte',
+            compactFilterLabel(selectedBilanAccountItems.map((account) => account.identifiant), 'Tous'),
+            'bilan-account',
+          )}
+          <Button type="button" tone="ghost" onClick={resetBilanFilters}>
             Reinitialiser
           </Button>
         </div>
@@ -886,8 +777,6 @@ export function ReportsPage() {
 
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="Analyse" title="Analyse" />
-
       {loading ? <LoadingState label="Preparation des analyses..." /> : null}
       {error ? <ErrorState message={apiErrorMessage(error)} /> : null}
 
@@ -911,586 +800,130 @@ export function ReportsPage() {
             </>
           ) : (
             <>
-              <Surface className="data-panel report-panel releve-account-panel">
-                <div className="releve-account-head">
-                  <div className="releve-account-copy">
-                    <strong>{releve.enteteCompte.identifiant}</strong>
-                    <span>{releve.enteteCompte.typeFonctionnement ?? 'INTERNE'}</span>
-                  </div>
-                  <Badge>{formatCurrency(releve.montantSoldeFinReleveEnEuros)}</Badge>
-                </div>
-                <div className="pill-list releve-account-pills">
-                  {releve.enteteCompte.libelle ? <Badge>{releve.enteteCompte.libelle}</Badge> : null}
-                  {releve.enteteCompte.banque ? <Badge>{releve.enteteCompte.banque}</Badge> : null}
-                  {(releve.enteteCompte.titulaires ?? []).map((item) => (
-                    <Badge key={item}>{item}</Badge>
-                  ))}
-                </div>
-              </Surface>
-
               {releveFilterControls}
+              <ReleveDashboard releve={releve} />
 
-              <div className="stat-grid releve-stat-grid">
-                <Surface className="stat-card stat-card-compact">
-                  <span className="eyebrow">Solde debut</span>
-                  <strong>{formatCurrency(releve.montantSoldeDebutReleveEnEuros)}</strong>
-                  <p>{describePeriod({ key: '', label: '', start: releve.dateDebutReleve, end: releve.dateDebutReleve })}</p>
-                </Surface>
-                <Surface className="stat-card stat-card-compact">
-                  <span className="eyebrow">Recettes</span>
-                  <strong>{formatCurrency(releve.montantTotalOperationsRecetteEnEuros)}</strong>
-                  <p>{releve.totalOperationsRecette ?? releve.operationsRecette.length} operation(s)</p>
-                </Surface>
-                <Surface className="stat-card stat-card-compact">
-                  <span className="eyebrow">Depenses</span>
-                  <strong>{formatCurrency(releve.montantTotalOperationsDepenseEnEuros)}</strong>
-                  <p>{releve.totalOperationsDepense ?? releve.operationsDepense.length} operation(s)</p>
-                </Surface>
-                <Surface className="stat-card stat-card-compact">
-                  <span className="eyebrow">Solde fin</span>
-                  <strong>{formatCurrency(releve.montantSoldeFinReleveEnEuros)}</strong>
-                  <p>Ecart {formatCurrency(releve.montantEcartEnEuros)}</p>
-                </Surface>
-              </div>
-
-              <Surface className="data-panel report-panel releve-flow-panel">
-                <div className="releve-flow-head">
-                  <div className="report-switch-row releve-switch-row">
-                    <button
-                      type="button"
-                      className={cx('report-switch-chip', 'releve-switch-chip', 'left', releveMode !== 'depenses' && 'active')}
-                      onClick={() => setReleveMode((current) => (current === 'recettes' ? 'both' : 'recettes'))}
-                    >
-                      Recettes
-                    </button>
-                    <button
-                      type="button"
-                      className={cx('report-switch-chip', 'releve-switch-chip', 'right', releveMode !== 'recettes' && 'active')}
-                      onClick={() => setReleveMode((current) => (current === 'depenses' ? 'both' : 'depenses'))}
-                    >
-                      Depenses
-                    </button>
-                  </div>
-                </div>
-
-                <div className={cx('report-split-grid releve-split-grid', releveMode !== 'both' && 'single', releveMode === 'both' && 'dual')}>
-                  {releveMode !== 'depenses' ? (
-                    <div className="releve-flow-column">
-                      <div className="releve-flow-meta">
-                        <Badge tone="success">{formatCurrency(releve.montantTotalOperationsRecetteEnEuros)}</Badge>
-                        <span>{releve.totalOperationsRecette ?? releve.operationsRecette.length} operation(s)</span>
-                      </div>
-                    {!releveOperationsRecette.length ? (
-                      <EmptyState title="Aucune recette" description="Aucun mouvement sur cette plage." />
-                    ) : (
-                      <>
-                        {renderRelevePaginationControls('recette', 'top')}
-                        <div className="report-hover-list-grid dense">
-                          {releveOperationsRecette.map((row) => (
-                            <div key={`releve-r-${row.numero}`} className="report-hover-wrap">
-                              <div className="report-line-card">
-                                <div className="releve-line-text">
-                                  <strong>{row.libelle ?? row.numero}</strong>
-                                  <span>
-                                    {formatDate(row.dateComptabilisation)} · {row.identifiantAutreCompte}
-                                  </span>
-                                </div>
-                                <Badge tone="success">{formatCurrency(row.montantEnEuros)}</Badge>
-                              </div>
-                              <HoverDetailsCard
-                                title={row.libelle ?? 'Operation'}
-                                subtitle={`${formatDate(row.dateComptabilisation)} · ${row.codeTypeOperation}`}
-                                items={[
-                                  {
-                                    primary: row.identifiantAutreCompte,
-                                    secondary: row.libelleAutreCompte ?? undefined,
-                                    amount: formatCurrency(row.montantEnEuros),
-                                  },
-                                ]}
-                              />
-                            </div>
-                          ))}
-                        </div>
-                        {renderRelevePaginationControls('recette', 'bottom')}
-                      </>
-                    )}
-                    </div>
-                  ) : null}
-
-                  {releveMode !== 'recettes' ? (
-                    <div className="releve-flow-column">
-                      <div className="releve-flow-meta">
-                        <Badge>{formatCurrency(releve.montantTotalOperationsDepenseEnEuros)}</Badge>
-                        <span>{releve.totalOperationsDepense ?? releve.operationsDepense.length} operation(s)</span>
-                      </div>
-                    {!releveOperationsDepense.length ? (
-                      <EmptyState title="Aucune depense" description="Aucun mouvement sur cette plage." />
-                    ) : (
-                      <>
-                        {renderRelevePaginationControls('depense', 'top')}
-                        <div className="report-hover-list-grid dense">
-                          {releveOperationsDepense.map((row) => (
-                            <div key={`releve-d-${row.numero}`} className="report-hover-wrap">
-                              <div className="report-line-card">
-                                <div className="releve-line-text">
-                                  <strong>{row.libelle ?? row.numero}</strong>
-                                  <span>
-                                    {formatDate(row.dateComptabilisation)} · {row.identifiantAutreCompte}
-                                  </span>
-                                </div>
-                                <Badge>{formatCurrency(row.montantEnEuros)}</Badge>
-                              </div>
-                              <HoverDetailsCard
-                                title={row.libelle ?? 'Operation'}
-                                subtitle={`${formatDate(row.dateComptabilisation)} · ${row.codeTypeOperation}`}
-                                items={[
-                                  {
-                                    primary: row.identifiantAutreCompte,
-                                    secondary: row.libelleAutreCompte ?? undefined,
-                                    amount: formatCurrency(row.montantEnEuros),
-                                  },
-                                ]}
-                              />
-                            </div>
-                          ))}
-                        </div>
-                        {renderRelevePaginationControls('depense', 'bottom')}
-                      </>
-                    )}
-                    </div>
-                  ) : null}
-                </div>
-              </Surface>
+              <ReleveMovementsPanel
+                releve={releve}
+                mode={releveMode}
+                pageSize={relevePageSize}
+                recettePage={releveRecettePage}
+                depensePage={releveDepensePage}
+                onModeChange={setReleveMode}
+                onPageSizeChange={changeRelevePageSize}
+                onRecettePageChange={setReleveRecettePage}
+                onDepensePageChange={setReleveDepensePage}
+              />
             </>
           )}
         </div>
       ) : null}
 
       {tab === 'resumes' ? (
-        <div className="page-stack">
-          <Surface className="catalog-panel">
-            <div className="operation-filter-stack">
-              <div className="operation-filter-row">
-                {renderReportFilterButton('Date', resumeDate || 'Toutes', 'resume-date')}
-                {renderReportFilterButton('Type', resumeType || 'Tous', 'resume-type')}
-                {renderReportFilterButton(
-                  'Compte',
-                  compactFilterLabel(selectedResumeAccountItems.map((account) => account.identifiant), 'Tous'),
-                  'resume-account',
-                )}
-                <Button type="button" tone="ghost" onClick={resetResumeFilters}>
-                  Reinitialiser
-                </Button>
-              </div>
-            </div>
-          </Surface>
-
+        <div className="page-stack resume-page-stack">
           {!resumeGroups.length ? (
-            <EmptyState title="Aucun resume" description="Ajuste les filtres ou choisis une date valide." />
+            <>
+              {resumeFilterControls}
+              <EmptyState title="Aucun resume" description="Ajuste les filtres ou choisis une date valide." />
+            </>
           ) : (
             <>
-              <Surface className="data-panel">
-                <SectionHeader title="Total" aside={<Badge>{formatCurrency(resumes.reduce((sum, row) => sum + row.montantSoldeEnEuros, 0))}</Badge>} />
-              </Surface>
-
-              {resumeGroups.map((group) => (
-                <CollapsibleReportSection
-                  key={group.type}
-                  title={group.type}
-                  aside={<Badge>{formatCurrency(group.total)}</Badge>}
-                  open={isSectionOpen(resumeSections, group.type)}
-                  onToggle={() => setResumeSections((current) => toggleSectionState(current, group.type))}
-                >
-                  <div className="table-wrapper">
-                    <table className="report-table">
-                      <thead>
-                        <tr>
-                          <th>Compte</th>
-                          <th>Banque</th>
-                          <th>Titulaires</th>
-                          <th>Solde</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {group.accounts.map((row) => (
-                          <tr key={row.identifiant}>
-                            <td>{row.identifiant}</td>
-                            <td>{row.banque ?? 'Aucune'}</td>
-                            <td>{row.titulaires.join(', ') || 'Aucun'}</td>
-                            <td>{formatCurrency(row.montantSoldeEnEuros)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                      <tfoot>
-                        <tr>
-                          <td colSpan={3}>Total</td>
-                          <td>{formatCurrency(group.total)}</td>
-                        </tr>
-                      </tfoot>
-                    </table>
-                  </div>
-                </CollapsibleReportSection>
-              ))}
+              {resumeFilterControls}
+              <ResumeDashboard
+                resumes={resumes}
+                groups={resumeGroups}
+                date={resumeDate}
+              />
+              <ResumeGroupsPanel groups={resumeGroups} />
             </>
           )}
         </div>
       ) : null}
 
       {tab === 'depense' ? (
-        <div className="page-stack">
-          <Surface className="catalog-panel">
-            <div className="operation-filter-stack">
-              <div className="operation-filter-row">
-                {renderReportFilterButton('Date', dateRangeFilterLabel(depenseStart, depenseEnd), 'depense-date')}
-                {renderReportFilterButton('Periode', periodFilterLabel(depensePeriod), 'depense-period')}
-                {renderReportFilterButton('Beneficiaire', depenseBeneficiaire || 'Tous', 'depense-beneficiary')}
-                {renderReportFilterButton('Categorie', compactFilterLabel(depenseCategories, 'Toutes'), 'depense-category')}
-                {renderReportFilterButton('Sous-categorie', compactFilterLabel(depenseSousCategories, 'Toutes'), 'depense-subcategory')}
-                <Button type="button" tone="ghost" onClick={resetDepenseFilters}>
-                  Reinitialiser
-                </Button>
-              </div>
-            </div>
-          </Surface>
-
+        <div className="page-stack depense-recette-page-stack">
           {!depenseReport || !depenseReport.categories.length ? (
-            <EmptyState title="Aucune donnee" description="Ajuste les filtres ou choisis une plage valide." />
+            <>
+              {depenseFilterControls}
+              <EmptyState title="Aucune donnee" description="Ajuste les filtres ou choisis une plage valide." />
+            </>
           ) : (
             <>
-              <Surface className="data-panel report-panel">
-                <SectionHeader title="Totaux" />
-                <InlinePeriodTotals
-                  items={depenseReport.totals.map((period) => ({
-                    label: period.label,
-                    summary: `R ${formatCurrency(period.recette)} · D ${formatCurrency(period.depense)} · S ${formatCurrency(period.solde)}`,
-                  }))}
-                />
-              </Surface>
-
-              {depenseReport.categories.map((category) => {
-                const key = category.categorie?.nom ?? 'Sans categorie'
-                return (
-                  <CollapsibleReportSection
-                    key={key}
-                    title={key}
-                    aside={<Badge>{formatCurrency(sumPeriodSolde(category.totals))}</Badge>}
-                    open={isSectionOpen(depenseSections, key)}
-                    onToggle={() => setDepenseSections((current) => toggleSectionState(current, key))}
-                  >
-                    <div className="table-wrapper report-table-soft">
-                      <table className="report-table">
-                        <thead>
-                          <tr>
-                            <th>Sous-categorie</th>
-                            {depenseReport.periods.map((period) => (
-                              <th key={period.key}>{period.label}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {category.children.map((child) => (
-                            <tr key={child.sousCategorie?.nom ?? 'none'}>
-                              <td>{child.sousCategorie?.nom ?? 'Sans sous-categorie'}</td>
-                              {child.periods.map((period) => (
-                                <td key={`${child.sousCategorie?.nom}_${period.start}`}>
-                                  <div className="report-hover-wrap table-cell-hover">
-                                    <div className="report-cell-main">
-                                      <strong>{formatCurrency(period.solde)}</strong>
-                                      <span className="cell-subline">{reportCellLabel(period.recette, period.depense)}</span>
-                                    </div>
-                                    {period.details.length ? (
-                                      <HoverDetailsCard
-                                        title={child.sousCategorie?.nom ?? 'Sans sous-categorie'}
-                                        subtitle={describePeriod({ key: '', label: '', start: period.start, end: period.end })}
-                                        items={period.details.map((item) => ({
-                                          primary: item.libelle ?? item.numero,
-                                          secondary: `${formatDate(item.date)}${item.beneficiaires.length ? ` · ${item.beneficiaires.join(', ')}` : ''}`,
-                                          amount: formatCurrency(item.montantEnEuros),
-                                        }))}
-                                      />
-                                    ) : null}
-                                  </div>
-                                </td>
-                              ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                        <tfoot>
-                          <tr>
-                            <td>Total</td>
-                            {category.totals.map((period) => (
-                              <td key={`${key}-${period.start}`}>{formatCurrency(period.solde)}</td>
-                            ))}
-                          </tr>
-                        </tfoot>
-                      </table>
-                    </div>
-                  </CollapsibleReportSection>
-                )
-              })}
+              {depenseFilterControls}
+              <DepenseRecetteDashboard
+                report={depenseReport}
+                start={depenseStart}
+                end={depenseEnd}
+                periodLabel={periodFilterLabel(depensePeriod)}
+                subcategoryCount={depenseSousCategories.length}
+              />
+              <DepenseRecetteCategoriesPanel report={depenseReport} />
             </>
           )}
         </div>
       ) : null}
 
       {tab === 'plusmoins' ? (
-        <div className="page-stack">
-          <Surface className="catalog-panel">
-            <div className="operation-filter-stack">
-              <div className="operation-filter-row">
-                {renderReportFilterButton('Date', dateRangeFilterLabel(plusStart, plusEnd), 'plus-date')}
-                {renderReportFilterButton('Periode', periodFilterLabel(plusPeriod), 'plus-period')}
-                {renderReportFilterButton('Titulaire', plusTitulaire || 'Tous', 'plus-titulaire')}
-                {renderReportFilterButton('Type', compactFilterLabel(plusTypes, 'Tous'), 'plus-type')}
-                {renderReportFilterButton(
-                  'Compte',
-                  compactFilterLabel(selectedPlusAccountItems.map((account) => account.identifiant), 'Tous'),
-                  'plus-account',
-                )}
-                <Button type="button" tone="ghost" onClick={resetPlusMoinsFilters}>
-                  Reinitialiser
-                </Button>
-              </div>
-            </div>
-          </Surface>
-
+        <div className="page-stack plus-moins-page-stack">
           {!plusMoinsReport || !plusMoinsReport.groups.length ? (
-            <EmptyState title="Aucune plus/moins-value" description="Ajuste les filtres ou la plage." />
+            <>
+              {plusFilterControls}
+              <EmptyState title="Aucune plus/moins-value" description="Ajuste les filtres ou la plage." />
+            </>
           ) : (
             <>
-              <Surface className="data-panel report-panel">
-                <SectionHeader title="Totaux" />
-                <InlinePeriodTotals
-                  items={plusMoinsReport.totals.map((period) => ({
-                    label: period.label,
-                    summary: `PMV ${formatCurrency(period.montantPlusMoinsValueNetteEnEuros)} · Taux ${rateLabel(period.tauxPlusMoinsValueNette)} · Frais ${formatCurrency(period.montantFraisEnEuros)}`,
-                  }))}
-                />
-              </Surface>
-
-              {plusMoinsReport.groups.map((group) => (
-                <CollapsibleReportSection
-                  key={group.typeFonctionnement}
-                  title={group.typeFonctionnement}
-                  aside={<Badge>{formatCurrency(sumPlusMoinsValue(group.periods))}</Badge>}
-                  open={isSectionOpen(plusSections, group.typeFonctionnement)}
-                  onToggle={() => setPlusSections((current) => toggleSectionState(current, group.typeFonctionnement))}
-                >
-                  <div className="table-wrapper report-table-soft">
-                    <table className="report-table">
-                      <thead>
-                        <tr>
-                          <th>Compte</th>
-                          {plusMoinsReport.periods.map((period) => (
-                            <th key={period.key}>{period.label}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {group.accounts.map((account) => (
-                          <tr key={account.identifiant}>
-                            <td>{account.identifiant}</td>
-                            {account.periods.map((period) => (
-                              <td key={`${account.identifiant}_${period.start}`}>
-                                {formatCurrency(period.montantPlusMoinsValueNetteEnEuros)}
-                                <div className="cell-subline">Taux {rateLabel(period.tauxPlusMoinsValueNette)}</div>
-                                <div className="cell-subline">Ops {formatCurrency(period.montantOperationsEnEuros)}</div>
-                                <div className="cell-subline">Frais {formatCurrency(period.montantFraisEnEuros)}</div>
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                      <tfoot>
-                        <tr>
-                          <td>Total</td>
-                          {group.periods.map((period) => (
-                            <td key={`${group.typeFonctionnement}-${period.start}`}>
-                              {formatCurrency(period.montantPlusMoinsValueNetteEnEuros)}
-                              <div className="cell-subline">Taux {rateLabel(period.tauxPlusMoinsValueNette)}</div>
-                            </td>
-                          ))}
-                        </tr>
-                      </tfoot>
-                    </table>
-                  </div>
-                </CollapsibleReportSection>
-              ))}
+              {plusFilterControls}
+              <PlusMoinsDashboard
+                report={plusMoinsReport}
+                start={plusStart}
+                end={plusEnd}
+                periodLabel={periodFilterLabel(plusPeriod)}
+              />
+              <PlusMoinsGroupsPanel report={plusMoinsReport} />
             </>
           )}
         </div>
       ) : null}
 
       {tab === 'remunerations' ? (
-        <div className="page-stack">
-          <Surface className="catalog-panel">
-            <div className="operation-filter-stack">
-              <div className="operation-filter-row">
-                {renderReportFilterButton('Date', dateRangeFilterLabel(remStart, remEnd), 'rem-date')}
-                {renderReportFilterButton('Periode', periodFilterLabel(remPeriod), 'rem-period')}
-                {renderReportFilterButton('Titulaire', remTitulaire || 'Tous', 'rem-titulaire')}
-                {renderReportFilterButton('Type', compactFilterLabel(remTypes, 'Tous'), 'rem-type')}
-                {renderReportFilterButton(
-                  'Compte',
-                  compactFilterLabel(selectedRemAccountItems.map((account) => account.identifiant), 'Tous'),
-                  'rem-account',
-                )}
-                <Button type="button" tone="ghost" onClick={resetRemunerationFilters}>
-                  Reinitialiser
-                </Button>
-              </div>
-            </div>
-          </Surface>
-
+        <div className="page-stack remunerations-page-stack">
           {!remunerationReport || !remunerationReport.groups.length ? (
-            <EmptyState title="Aucune donnee" description="Ajuste les filtres ou la plage." />
+            <>
+              {remunerationFilterControls}
+              <EmptyState title="Aucune donnee" description="Ajuste les filtres ou la plage." />
+            </>
           ) : (
             <>
-              <Surface className="data-panel report-panel">
-                <SectionHeader title="Totaux" />
-                <InlinePeriodTotals
-                  items={remunerationReport.totals.map((period) => ({
-                    label: period.label,
-                    summary: `R ${formatCurrency(period.recette)} · F ${formatCurrency(period.depense)} · N ${formatCurrency(period.solde)}`,
-                  }))}
-                />
-              </Surface>
-
-              {remunerationReport.groups.map((group) => (
-                <CollapsibleReportSection
-                  key={group.typeFonctionnement}
-                  title={group.typeFonctionnement}
-                  aside={<Badge>{formatCurrency(sumPeriodSolde(group.periods))}</Badge>}
-                  open={isSectionOpen(remSections, group.typeFonctionnement)}
-                  onToggle={() => setRemSections((current) => toggleSectionState(current, group.typeFonctionnement))}
-                >
-                  <div className="table-wrapper report-table-soft">
-                    <table className="report-table">
-                      <thead>
-                        <tr>
-                          <th>Compte</th>
-                          {remunerationReport.periods.map((period) => (
-                            <th key={period.key}>{period.label}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {group.accounts.map((account) => (
-                          <tr key={account.identifiant}>
-                            <td>{account.identifiant}</td>
-                            {account.periods.map((period) => (
-                              <td key={`${account.identifiant}_${period.start}`}>
-                                {formatCurrency(period.solde)}
-                                <div className="cell-subline">{reportCellLabel(period.recette, period.depense, 'F')}</div>
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                      <tfoot>
-                        <tr>
-                          <td>Total</td>
-                          {group.periods.map((period) => (
-                            <td key={`${group.typeFonctionnement}-${period.start}`}>{formatCurrency(period.solde)}</td>
-                          ))}
-                        </tr>
-                      </tfoot>
-                    </table>
-                  </div>
-                </CollapsibleReportSection>
-              ))}
+              {remunerationFilterControls}
+              <RemunerationsDashboard
+                report={remunerationReport}
+                start={remStart}
+                end={remEnd}
+                periodLabel={periodFilterLabel(remPeriod)}
+              />
+              <RemunerationsGroupsPanel report={remunerationReport} />
             </>
           )}
         </div>
       ) : null}
 
       {tab === 'bilan' ? (
-        <div className="page-stack">
-          <Surface className="catalog-panel">
-            <div className="operation-filter-stack">
-              <div className="operation-filter-row">
-                {renderReportFilterButton('Date', dateRangeFilterLabel(bilanStart, bilanEnd), 'bilan-date')}
-                {renderReportFilterButton('Periode', periodFilterLabel(bilanPeriod), 'bilan-period')}
-                {renderReportFilterButton('Titulaire', bilanTitulaire || 'Tous', 'bilan-titulaire')}
-                {renderReportFilterButton('Type', compactFilterLabel(bilanTypes, 'Tous'), 'bilan-type')}
-                {renderReportFilterButton(
-                  'Compte',
-                  compactFilterLabel(selectedBilanAccountItems.map((account) => account.identifiant), 'Tous'),
-                  'bilan-account',
-                )}
-                <Button type="button" tone="ghost" onClick={resetBilanFilters}>
-                  Reinitialiser
-                </Button>
-              </div>
-            </div>
-          </Surface>
-
+        <div className="page-stack bilan-page-stack">
           {!bilanReport || !bilanReport.groups.length ? (
-            <EmptyState title="Aucun bilan" description="Ajuste les filtres ou la plage." />
+            <>
+              {bilanFilterControls}
+              <EmptyState title="Aucun bilan" description="Ajuste les filtres ou la plage." />
+            </>
           ) : (
             <>
-              <CollapsibleReportSection
-                title="Bilan patrimoine"
-                aside={<Badge>{formatCurrency(bilanReport.montantSoldeInitialEnEuros)}</Badge>}
-                open={isSectionOpen(bilanSections, '__overview__')}
-                onToggle={() => setBilanSections((current) => toggleSectionState(current, '__overview__'))}
-              >
-                <InlinePeriodTotals
-                  items={bilanReport.totals.map((period) => ({
-                    label: period.label,
-                    summary: `Fin ${formatCurrency(period.montantSoldeFinalEnEuros)} · Tech ${formatCurrency(period.soldeTotalTechniqueEnEuros)} · Ecart ${formatCurrency(period.montantEcartNonJustifieEnEuros)}`,
-                  }))}
-                />
-              </CollapsibleReportSection>
-
-              {bilanReport.groups.map((group) => (
-                <CollapsibleReportSection
-                  key={group.typeFonctionnement}
-                  title={group.typeFonctionnement}
-                  aside={<Badge>{formatCurrency(safeTrailingValue(group.periods))}</Badge>}
-                  open={isSectionOpen(bilanSections, group.typeFonctionnement)}
-                  onToggle={() => setBilanSections((current) => toggleSectionState(current, group.typeFonctionnement))}
-                >
-                  <div className="report-inline-note">
-                    <span>Initial</span>
-                    <strong>{formatCurrency(group.montantSoldeInitialEnEuros)}</strong>
-                  </div>
-                  <div className="table-wrapper">
-                    <table className="report-table">
-                      <thead>
-                        <tr>
-                          <th>Compte</th>
-                          {bilanReport.periods.map((period) => (
-                            <th key={period.key}>{period.label}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {group.accounts.map((account) => (
-                          <tr key={account.identifiant}>
-                            <td>{account.identifiant}</td>
-                            {account.periods.map((period) => (
-                              <td key={`${account.identifiant}_${period.start}`}>
-                                {formatCurrency(period.montantSoldeFinalEnEuros)}
-                                <div className="cell-subline">Init {formatCurrency(period.montantSoldeInitialEnEuros)}</div>
-                                <div className="cell-subline">Ecart {formatCurrency(period.montantEcartNonJustifieEnEuros)}</div>
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                      <tfoot>
-                        <tr>
-                          <td>Total</td>
-                          {group.periods.map((period) => (
-                            <td key={`${group.typeFonctionnement}-${period.start}`}>{formatCurrency(period.montantSoldeFinalEnEuros)}</td>
-                          ))}
-                        </tr>
-                      </tfoot>
-                    </table>
-                  </div>
-                </CollapsibleReportSection>
-              ))}
+              {bilanFilterControls}
+              <BilanDashboard
+                report={bilanReport}
+                start={bilanStart}
+                end={bilanEnd}
+                periodLabel={periodFilterLabel(bilanPeriod)}
+              />
+              <BilanGroupsPanel report={bilanReport} />
             </>
           )}
         </div>
@@ -1531,11 +964,11 @@ export function ReportsPage() {
                     key={account.identifiant}
                     type="button"
                     className={cx('wizard-choice-card filter-choice-card', active && 'active')}
-                    onClick={() => {
+                    onClick={() => applySingleChoiceFilter(() => {
                       setReleveAccountId(account.identifiant)
                       setReleveRecettePage(1)
                       setReleveDepensePage(1)
-                    }}
+                    })}
                   >
                     <div>
                       <strong>{account.identifiant}</strong>
@@ -1634,7 +1067,7 @@ export function ReportsPage() {
             {internalAccountTypes.map((value) => {
               const active = resumeType === value
               return (
-                <button key={value} type="button" className={cx('wizard-choice-card filter-choice-card', active && 'active')} onClick={() => setResumeType(active ? '' : value)}>
+                <button key={value} type="button" className={cx('wizard-choice-card filter-choice-card', active && 'active')} onClick={() => applySingleChoiceFilter(() => setResumeType(value))}>
                   <div>
                     <strong>{value}</strong>
                     <span>Type de compte interne</span>
@@ -1728,7 +1161,7 @@ export function ReportsPage() {
             {periodOptions.map((option) => {
               const active = depensePeriod === option.value
               return (
-                <button key={option.value || 'global'} type="button" className={cx('wizard-choice-card filter-choice-card', active && 'active')} onClick={() => setDepensePeriod(option.value)}>
+                <button key={option.value || 'global'} type="button" className={cx('wizard-choice-card filter-choice-card', active && 'active')} onClick={() => applySingleChoiceFilter(() => setDepensePeriod(option.value))}>
                   <div>
                     <strong>{option.label}</strong>
                     <span>{option.value || 'GLOBAL'}</span>
@@ -1764,7 +1197,7 @@ export function ReportsPage() {
               {filteredDepenseBeneficiaires.map((item) => {
                 const active = depenseBeneficiaire === item.nom
                 return (
-                  <button key={item.nom} type="button" className={cx('wizard-choice-card filter-choice-card compact', active && 'active')} onClick={() => setDepenseBeneficiaire(active ? '' : item.nom)}>
+                  <button key={item.nom} type="button" className={cx('wizard-choice-card filter-choice-card compact', active && 'active')} onClick={() => applySingleChoiceFilter(() => setDepenseBeneficiaire(item.nom))}>
                     <div>
                       <strong>{item.nom}</strong>
                       <span>{item.libelle ?? ' '}</span>
@@ -1934,7 +1367,7 @@ export function ReportsPage() {
             {periodOptions.map((option) => {
               const active = plusPeriod === option.value
               return (
-                <button key={option.value || 'global'} type="button" className={cx('wizard-choice-card filter-choice-card', active && 'active')} onClick={() => setPlusPeriod(option.value)}>
+                <button key={option.value || 'global'} type="button" className={cx('wizard-choice-card filter-choice-card', active && 'active')} onClick={() => applySingleChoiceFilter(() => setPlusPeriod(option.value))}>
                   <div>
                     <strong>{option.label}</strong>
                     <span>{option.value || 'GLOBAL'}</span>
@@ -1970,7 +1403,7 @@ export function ReportsPage() {
               {filteredPlusTitulaires.map((item) => {
                 const active = plusTitulaire === item.nom
                 return (
-                  <button key={item.nom} type="button" className={cx('wizard-choice-card filter-choice-card compact', active && 'active')} onClick={() => setPlusTitulaire(active ? '' : item.nom)}>
+                  <button key={item.nom} type="button" className={cx('wizard-choice-card filter-choice-card compact', active && 'active')} onClick={() => applySingleChoiceFilter(() => setPlusTitulaire(item.nom))}>
                     <div>
                       <strong>{item.nom}</strong>
                       <span>{item.libelle ?? ' '}</span>
@@ -2094,7 +1527,7 @@ export function ReportsPage() {
             {periodOptions.map((option) => {
               const active = remPeriod === option.value
               return (
-                <button key={option.value || 'global'} type="button" className={cx('wizard-choice-card filter-choice-card', active && 'active')} onClick={() => setRemPeriod(option.value)}>
+                <button key={option.value || 'global'} type="button" className={cx('wizard-choice-card filter-choice-card', active && 'active')} onClick={() => applySingleChoiceFilter(() => setRemPeriod(option.value))}>
                   <div>
                     <strong>{option.label}</strong>
                     <span>{option.value || 'GLOBAL'}</span>
@@ -2130,7 +1563,7 @@ export function ReportsPage() {
               {filteredRemTitulaires.map((item) => {
                 const active = remTitulaire === item.nom
                 return (
-                  <button key={item.nom} type="button" className={cx('wizard-choice-card filter-choice-card compact', active && 'active')} onClick={() => setRemTitulaire(active ? '' : item.nom)}>
+                  <button key={item.nom} type="button" className={cx('wizard-choice-card filter-choice-card compact', active && 'active')} onClick={() => applySingleChoiceFilter(() => setRemTitulaire(item.nom))}>
                     <div>
                       <strong>{item.nom}</strong>
                       <span>{item.libelle ?? ' '}</span>
@@ -2254,7 +1687,7 @@ export function ReportsPage() {
             {periodOptions.map((option) => {
               const active = bilanPeriod === option.value
               return (
-                <button key={option.value || 'global'} type="button" className={cx('wizard-choice-card filter-choice-card', active && 'active')} onClick={() => setBilanPeriod(option.value)}>
+                <button key={option.value || 'global'} type="button" className={cx('wizard-choice-card filter-choice-card', active && 'active')} onClick={() => applySingleChoiceFilter(() => setBilanPeriod(option.value))}>
                   <div>
                     <strong>{option.label}</strong>
                     <span>{option.value || 'GLOBAL'}</span>
@@ -2290,7 +1723,7 @@ export function ReportsPage() {
               {filteredBilanTitulaires.map((item) => {
                 const active = bilanTitulaire === item.nom
                 return (
-                  <button key={item.nom} type="button" className={cx('wizard-choice-card filter-choice-card compact', active && 'active')} onClick={() => setBilanTitulaire(active ? '' : item.nom)}>
+                  <button key={item.nom} type="button" className={cx('wizard-choice-card filter-choice-card compact', active && 'active')} onClick={() => applySingleChoiceFilter(() => setBilanTitulaire(item.nom))}>
                     <div>
                       <strong>{item.nom}</strong>
                       <span>{item.libelle ?? ' '}</span>

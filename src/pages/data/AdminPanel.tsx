@@ -8,6 +8,7 @@ import { AdminCsvExports } from './AdminCsvExports'
 import { AdminDangerZone } from './AdminDangerZone'
 import { AdminDashboard } from './AdminDashboard'
 import { AdminExchangePanel } from './AdminExchangePanel'
+import { AdminPortableBuilderPanel } from './AdminPortableBuilderPanel'
 
 export function AdminPanel() {
   const queryClient = useQueryClient()
@@ -100,6 +101,8 @@ export function AdminPanel() {
         onExecuteScript={(script) => scriptMutation.mutateAsync(script)}
         onClearDatabase={() => clearMutation.mutateAsync()}
       />
+
+      <AdminPortableBuilderPanel />
     </div>
   )
 }

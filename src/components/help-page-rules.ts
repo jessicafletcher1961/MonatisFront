@@ -247,15 +247,39 @@ export const pageRules: PageHelpRules[] = [
       },
       {
         selector: '.releve-filter-panel',
-        help: 'Filtres du releve : choisit le compte et la periode utilises pour recalculer recettes, depenses et solde.',
+        help: 'Parametres du releve : choisit le compte interne et la periode. Tout le releve est recalcule depuis ces choix.',
       },
       {
-        selector: '.releve-account-panel',
-        help: 'Compte analyse : rappelle le compte, la periode et les informations de contexte du releve courant.',
+        selector: '.resume-filter-panel',
+        help: 'Parametres du resume : fixe la date de solde et limite eventuellement le perimetre par type ou comptes.',
       },
       {
-        selector: '.releve-stat-grid .stat-card',
-        help: 'Indicateur de releve : resume solde de debut, recettes, depenses ou solde de fin sur la periode choisie.',
+        selector: '.depense-recette-filter-panel',
+        help: 'Parametres depenses / recettes : choisit les dates, le decoupage temporel, le beneficiaire et les categories suivies.',
+      },
+      {
+        selector: '.plus-moins-filter-panel',
+        help: 'Parametres plus / moins-value : definit la periode, le decoupage et le perimetre de comptes internes a comparer.',
+      },
+      {
+        selector: '.remunerations-filter-panel',
+        help: 'Parametres remunerations / frais : selectionne la periode, les titulaires, les types et les comptes a analyser.',
+      },
+      {
+        selector: '.bilan-filter-panel',
+        help: 'Parametres bilan patrimoine : selectionne la plage, le decoupage et le perimetre du patrimoine calcule.',
+      },
+      {
+        selector: '.insight-hero',
+        help: 'Synthese principale : affiche la valeur centrale du rapport courant et la periode analysee.',
+      },
+      {
+        selector: '.insight-metric',
+        help: 'Indicateur : resume une valeur calculee du rapport. Sur les cartes specifiques, le texte precise exactement le calcul.',
+      },
+      {
+        selector: '.insight-chart-card',
+        help: 'Graphique : visualise une relation utile du rapport. Le selecteur de type conserve votre preference pour ce graphique.',
       },
       {
         selector: '.report-switch-chip',
@@ -270,8 +294,8 @@ export const pageRules: PageHelpRules[] = [
         help: "Section de rapport repliable : ouvre ou ferme un groupe de resultats pour garder l'analyse lisible.",
       },
       {
-        selector: '.report-inline-summary',
-        help: 'Synthese de periode : affiche les totaux calcules pour les periodes visibles.',
+        selector: '.report-panel',
+        help: 'Panneau de detail : affiche les groupes, comptes, categories ou mouvements qui expliquent la synthese du rapport.',
       },
       {
         selector: '.report-hover-wrap',

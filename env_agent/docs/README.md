@@ -5,7 +5,7 @@
 ## Pages de référence
 
 - [Vue d'ensemble](front-overview.md) : périmètre fonctionnel, routes principales et écrans livrés.
-- [Outillage et lancement](runtime-and-tooling.md) : scripts, variables d'environnement, serveur Vite et microservice PDF.
+- [Outillage et lancement](runtime-and-tooling.md) : scripts, variables d'environnement, serveur Vite et microservices locaux.
 - [Architecture](architecture.md) : organisation `src/`, responsabilités des modules et règles de découpage.
 - [Contrats API](api-contract.md) : endpoints consommés, adaptation au back actif et pagination front.
 - [Opérations et import](features-operations.md) : historique, création, détail, lignes et import de relevé.

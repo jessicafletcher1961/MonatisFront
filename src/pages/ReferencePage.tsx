@@ -8,7 +8,7 @@ import { z } from 'zod'
 import { QuickReferenceOverlay, type QuickReferenceDialogState } from '../components/quick-create'
 import { DEFAULT_CATALOG_PAGE_SIZE } from '../components/pagination-constants'
 import { CatalogPaginationControls } from '../components/pagination-controls'
-import { Badge, Button, EmptyState, ErrorState, FormField, LoadingState, OverlayPanel, PageHeader, QuickAddButton, Surface } from '../components/ui'
+import { Badge, Button, EmptyState, ErrorState, FormField, LoadingState, OverlayPanel, QuickAddButton, Surface } from '../components/ui'
 import { cx } from '../lib/cx'
 import { apiErrorMessage, type ReferenceDetail, type ReferenceListItem, type ReferenceResource, monatisApi } from '../lib/monatis-api'
 import { nullIfBlank } from '../lib/format'
@@ -258,25 +258,6 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
 
   return (
     <div className="page-stack">
-      <PageHeader
-        eyebrow={config.eyebrow}
-        title={config.title}
-        subtitle={config.subtitle}
-        actions={
-          <Button
-            tone="soft"
-            onClick={() => {
-              setCreateOpen(true)
-              setSelectedName(null)
-              setCategorySearch('')
-            }}
-          >
-            <Plus size={16} />
-            Nouveau
-          </Button>
-        }
-      />
-
       {listQuery.isLoading && !listQuery.data ? <LoadingState label={`Chargement des ${config.plural}...`} /> : null}
       {activeError ? <ErrorState message={apiErrorMessage(activeError)} /> : null}
 
@@ -294,6 +275,19 @@ export function ReferencePage({ config }: { config: ReferencePageConfig }) {
                 placeholder={`Rechercher ${config.singular.toLowerCase()}...`}
               />
             </label>
+            <div className="catalog-primary-actions">
+              <Button
+                tone="soft"
+                onClick={() => {
+                  setCreateOpen(true)
+                  setSelectedName(null)
+                  setCategorySearch('')
+                }}
+              >
+                <Plus size={16} />
+                Nouveau
+              </Button>
+            </div>
 
             <CatalogPaginationControls
               ariaLabel={`Pagination des ${config.plural} haut`}

@@ -8,7 +8,7 @@ import { z } from 'zod'
 
 import { QuickAccountOverlay, QuickReferenceOverlay, type QuickAccountDialogState, type QuickAccountKind, type QuickReferenceDialogState } from '../components/quick-create'
 import { StatementImportOverlay } from '../components/statement-import'
-import { Badge, Button, EmptyState, ErrorState, FormField, LoadingState, OverlayPanel, PageHeader, QuickAddButton, SectionHeader, Surface } from '../components/ui'
+import { Badge, Button, EmptyState, ErrorState, FormField, LoadingState, OverlayPanel, QuickAddButton, SectionHeader, Surface } from '../components/ui'
 import { cx } from '../lib/cx'
 import { formatCurrencyFromCents, formatDate, nullIfBlank, parseMoneyToCents, toMoneyInput, todayIso } from '../lib/format'
 import { apiErrorMessage, type CompteSummary, type OperationBasic, type OperationLinePayload, type OperationPageRequest, type ReferenceListItem, type TypeOperation, monatisApi } from '../lib/monatis-api'
@@ -2531,23 +2531,6 @@ export function OperationsPage() {
 
   return (
     <div className="page-stack">
-      <PageHeader
-        eyebrow="Operations"
-        title="Operations"
-        actions={
-          <>
-            <Button type="button" tone={statementImportOpen ? 'ghost' : 'soft'} disabled={createOpen} onClick={() => setStatementImportOpen((current) => !current)}>
-              <Upload size={16} />
-              {statementImportOpen ? 'Fermer import' : 'Importer releve'}
-            </Button>
-            <Button type="button" tone={createOpen ? 'ghost' : 'primary'} onClick={createOpen ? closeCreateFlow : openCreateFlow}>
-              {createOpen ? <X size={16} /> : <Plus size={16} />}
-              {createOpen ? 'Fermer' : 'Nouvelle operation'}
-            </Button>
-          </>
-        }
-      />
-
       {createOpen ? (
         <div className="operation-create-overlay" role="dialog" aria-modal="true" aria-label="Nouvelle operation">
           <button type="button" className="operation-create-backdrop" aria-label="Fond de la saisie" disabled />
@@ -3208,6 +3191,16 @@ export function OperationsPage() {
               <Button type="button" tone="ghost" onClick={clearOperationFilters}>
                 Reinitialiser
               </Button>
+              <div className="catalog-primary-actions">
+                <Button type="button" tone={statementImportOpen ? 'ghost' : 'soft'} disabled={createOpen} onClick={() => setStatementImportOpen((current) => !current)}>
+                  <Upload size={16} />
+                  {statementImportOpen ? 'Fermer import' : 'Importer releve'}
+                </Button>
+                <Button type="button" tone={createOpen ? 'ghost' : 'primary'} onClick={createOpen ? closeCreateFlow : openCreateFlow}>
+                  {createOpen ? <X size={16} /> : <Plus size={16} />}
+                  {createOpen ? 'Fermer' : 'Nouvelle operation'}
+                </Button>
+              </div>
             </div>
 
             <div className="operation-filter-row operation-filter-row-secondary">

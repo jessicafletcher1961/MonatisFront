@@ -55,29 +55,6 @@ export function Surface({
   )
 }
 
-export function PageHeader({
-  eyebrow,
-  title,
-  subtitle,
-  actions,
-}: {
-  eyebrow?: string
-  title: string
-  subtitle?: string
-  actions?: ReactNode
-}) {
-  return (
-    <header className="page-header" data-help={`Page "${title}" : presente le contexte, les informations et les actions principales de cette section.`}>
-      <div className="page-header-copy">
-        {eyebrow ? <span className="eyebrow">{eyebrow}</span> : null}
-        <h1>{title}</h1>
-        {subtitle ? <p>{subtitle}</p> : null}
-      </div>
-      {actions ? <div className="page-header-actions">{actions}</div> : null}
-    </header>
-  )
-}
-
 export function SectionHeader({
   title,
   subtitle,

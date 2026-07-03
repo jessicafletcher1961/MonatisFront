@@ -1,5 +1,6 @@
 import { Boxes, GitBranch, ListChecks, Tags } from 'lucide-react'
 
+import { InsightHero, InsightMetric, InsightMetricGrid, InsightMosaicChart, InsightPanel } from '../../components/insight'
 import { summarizeTypologies, type TypologyGroupViewModel } from './typology-utils'
 
 interface TypologyDashboardProps {
@@ -10,39 +11,40 @@ export function TypologyDashboard({ groups }: TypologyDashboardProps) {
   const summary = summarizeTypologies(groups)
 
   return (
-    <section className="typology-dashboard" data-help="Synthese du catalogue de typologies expose par le back.">
-      <article className="typology-summary-item typology-summary-item-main">
-        <Tags size={22} aria-hidden />
-        <div>
-          <span>Valeurs exposees</span>
-          <strong>{summary.totalValues}</strong>
-          <small>{summary.groupCount} familles chargees depuis le back</small>
-        </div>
-      </article>
-      <article className="typology-summary-item">
-        <ListChecks size={22} aria-hidden />
-        <div>
-          <span>Types operations</span>
-          <strong>{summary.operationValues}</strong>
-          <small>{summary.categorisableValues} categorisables, {summary.nonCategorisableValues} hors categorie</small>
-        </div>
-      </article>
-      <article className="typology-summary-item">
-        <GitBranch size={22} aria-hidden />
-        <div>
-          <span>Flux techniques</span>
-          <strong>{summary.technicalValues}</strong>
-          <small>Flags portes par les types operation</small>
-        </div>
-      </article>
-      <article className="typology-summary-item">
-        <Boxes size={22} aria-hidden />
-        <div>
-          <span>Famille la plus dense</span>
-          <strong>{summary.largestGroupTitle}</strong>
-          <small>{summary.largestGroupCount} valeur{summary.largestGroupCount > 1 ? 's' : ''}</small>
-        </div>
-      </article>
-    </section>
+    <InsightPanel className="typology-dashboard" help="Synthese du catalogue de typologies expose par le back.">
+      <InsightHero
+        eyebrow="Typologies"
+        value={summary.totalValues}
+        subtitle={`${summary.groupCount} familles chargees depuis le back`}
+        icon={Tags}
+        tone="neutral"
+        tags={[
+          { label: `${summary.operationValues} operations` },
+          { label: `${summary.technicalValues} flux techniques` },
+        ]}
+      />
+
+      <InsightMetricGrid>
+        <InsightMetric icon={Tags} label="Valeurs exposees" value={summary.totalValues} hint={`${summary.groupCount} familles`} />
+        <InsightMetric icon={ListChecks} label="Types operations" value={summary.operationValues} hint={`${summary.categorisableValues} categorisables, ${summary.nonCategorisableValues} hors categorie`} />
+        <InsightMetric icon={GitBranch} label="Flux techniques" value={summary.technicalValues} hint="Flags portes par les types operation" tone={summary.technicalValues ? 'warning' : 'default'} />
+        <InsightMetric icon={Boxes} label="Famille dense" value={summary.largestGroupTitle} hint={`${summary.largestGroupCount} valeur${summary.largestGroupCount > 1 ? 's' : ''}`} />
+      </InsightMetricGrid>
+
+      <InsightMosaicChart
+        chartId="data.typologies.catalog"
+        eyebrow="Catalogue"
+        title="Volume par famille"
+        subtitle="Chaque famille prend de la place selon son volume"
+        help="Mosaique typologies : compare le nombre de valeurs par famille de typologie."
+        variants={['treemap', 'bars', 'donut']}
+        items={groups.map((group) => ({
+          label: group.shortTitle,
+          value: group.items.length,
+          displayValue: group.items.length,
+          hint: group.usage,
+        }))}
+      />
+    </InsightPanel>
   )
 }

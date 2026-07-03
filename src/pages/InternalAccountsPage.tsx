@@ -8,7 +8,7 @@ import { z } from 'zod'
 import { QuickReferenceOverlay, type QuickReferenceDialogState } from '../components/quick-create'
 import { DEFAULT_CATALOG_PAGE_SIZE } from '../components/pagination-constants'
 import { CatalogPaginationControls } from '../components/pagination-controls'
-import { Badge, Button, EmptyState, ErrorState, FormField, LoadingState, OverlayPanel, PageHeader, QuickAddButton, Surface } from '../components/ui'
+import { Badge, Button, EmptyState, ErrorState, FormField, LoadingState, OverlayPanel, QuickAddButton, Surface } from '../components/ui'
 import { cx } from '../lib/cx'
 import { apiErrorMessage, type CompteInterneBasic, type CompteInterneDetail, type EvaluationBasic, type ReferenceListItem, type TypeFonctionnement, monatisApi } from '../lib/monatis-api'
 import { formatCurrency, formatCurrencyFromCents, formatDate, nullIfBlank, parseMoneyToCents, toMoneyInput, todayIso } from '../lib/format'
@@ -582,17 +582,6 @@ export function InternalAccountsPage() {
 
   return (
     <div className="page-stack">
-      <PageHeader
-        eyebrow="Comptes"
-        title="Internes"
-        actions={
-          <Button tone="soft" onClick={openCreateFlow}>
-            <Plus size={16} />
-            Nouveau
-          </Button>
-        }
-      />
-
       {accountsQuery.isLoading && !accountsQuery.data ? <LoadingState label="Chargement des comptes internes..." /> : null}
       {hasError ? <ErrorState message={apiErrorMessage(hasError)} /> : null}
 
@@ -612,6 +601,12 @@ export function InternalAccountsPage() {
             <Button type="button" tone="ghost" onClick={clearAccountFilters}>
               Reinitialiser
             </Button>
+            <div className="catalog-primary-actions">
+              <Button tone="soft" onClick={openCreateFlow}>
+                <Plus size={16} />
+                Nouveau
+              </Button>
+            </div>
           </div>
 
           <div className="operation-search-pagination-row">

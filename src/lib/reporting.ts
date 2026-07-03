@@ -18,7 +18,7 @@ import {
   type ReferenceBase,
   type ReferenceListItem,
 } from './monatis-api'
-import { buildPeriodBuckets, dayBefore, formatShortDate, isIsoWithinRange, type MonatisPeriodCode, type PeriodBucket } from './format'
+import { buildPeriodBuckets, dayAfter, dayBefore, formatShortDate, isIsoWithinRange, type MonatisPeriodCode, type PeriodBucket } from './format'
 
 export interface ReleveRow {
   numero: string
@@ -590,7 +590,12 @@ function operationAccountingDate(operation: OperationBasic): string {
 }
 
 function operationIsTechnical(operation: OperationBasic): boolean {
-  return operation.typeOperation?.fluxTechnique ?? false
+  if (operation.typeOperation?.fluxTechnique != null) {
+    return operation.typeOperation.fluxTechnique
+  }
+
+  const code = operationCode(operation)
+  return code.includes('+') || code.includes('-')
 }
 
 export function computeBalanceAtDate(
@@ -601,14 +606,21 @@ export function computeBalanceAtDate(
 ): number {
   let balance = account.montantSoldeInitialEnCentimes ?? 0
   let referenceDate = account.dateSoldeInitial
+  let operationStartDate = account.dateSoldeInitial
 
   const latestEvaluation = latestEvaluationAtDate(account.identifiant, evaluations, targetDate)
   if (latestEvaluation && latestEvaluation.dateSolde >= referenceDate) {
     balance = latestEvaluation.montantSoldeEnCentimes
     referenceDate = latestEvaluation.dateSolde
+    operationStartDate = dayAfter(latestEvaluation.dateSolde)
   }
 
-  if (targetDate < referenceDate) {
+  const initialBalanceDate = dayBefore(account.dateSoldeInitial)
+  if (targetDate < initialBalanceDate) {
+    return 0
+  }
+
+  if (targetDate < referenceDate || !operationStartDate) {
     return centsToEuros(balance)
   }
 
@@ -618,7 +630,7 @@ export function computeBalanceAtDate(
     }
 
     const accountingDate = operationAccountingDate(operation)
-    if (accountingDate <= referenceDate || accountingDate > targetDate) {
+    if (accountingDate < operationStartDate || accountingDate > targetDate) {
       return
     }
 
@@ -1170,7 +1182,6 @@ export function buildBilanPatrimoineReport(params: {
   nomTitulaire?: string | null
 }): BilanPatrimoineView {
   const periods = buildPeriodBuckets(params.dateDebut, params.dateFin, params.codeTypePeriode)
-  const technicalIds = new Set(params.technicalAccounts.map((item) => item.identifiant))
   const groups = new Map<string, BilanTypeView>()
 
   const eligibleAccounts = params.internalAccounts
@@ -1193,8 +1204,7 @@ export function buildBilanPatrimoineReport(params: {
       const periodOperations = params.operations.filter(
         (operation) =>
           operationAffectsAccount(operation, account.identifiant) &&
-          isIsoWithinRange(operation.dateValeur, period.start, period.end) &&
-          operation.dateValeur >= account.dateSoldeInitial,
+          isIsoWithinRange(operation.dateValeur, period.start, period.end),
       )
 
       const initial = computeBalanceAtDate(account, params.operations, dayBefore(period.start), params.evaluations ?? [])
@@ -1203,18 +1213,19 @@ export function buildBilanPatrimoineReport(params: {
       const totalRecette = roundMoney(
         periodOperations
           .filter((operation) => recetteId(operation) === account.identifiant)
+          .filter((operation) => !operationIsTechnical(operation))
           .reduce((total, operation) => total + centsToEuros(operation.montantEnCentimes), 0),
       )
       const totalDepense = roundMoney(
         periodOperations
           .filter((operation) => depenseId(operation) === account.identifiant)
+          .filter((operation) => !operationIsTechnical(operation))
           .reduce((total, operation) => total + centsToEuros(operation.montantEnCentimes), 0),
       )
 
       const technical = roundMoney(
         periodOperations.reduce((total, operation) => {
-          const otherId = recetteId(operation) === account.identifiant ? depenseId(operation) : recetteId(operation)
-          if (!technicalIds.has(otherId)) {
+          if (!operationIsTechnical(operation)) {
             return total
           }
 
@@ -1231,7 +1242,7 @@ export function buildBilanPatrimoineReport(params: {
         montantTotalRecetteEnEuros: totalRecette,
         montantTotalDepenseEnEuros: totalDepense,
         soldeTotalTechniqueEnEuros: technical,
-        montantEcartNonJustifieEnEuros: roundMoney(final - (initial + totalRecette - totalDepense)),
+        montantEcartNonJustifieEnEuros: roundMoney(final - (initial + totalRecette - totalDepense + technical)),
       }
     })
 

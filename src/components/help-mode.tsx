@@ -20,7 +20,6 @@ const helpSelector = [
   '.segmented-option',
   '.inline-segmented-option',
   '.shell-nav-link',
-  '.page-header',
   '.section-header',
   '.stat-card',
   '.budget-summary-item',
@@ -141,10 +140,6 @@ function inferHelp(element: HTMLElement): string | null {
 
   if (element.closest('.floating-panel-nav-header')) {
     return `Bandeau de detail : permet de passer a l'element precedent ou suivant et de fermer le cadre.`
-  }
-
-  if (element.closest('.page-header')) {
-    return `En-tete de page : indique la section active et son objectif.`
   }
 
   if (element.closest('.section-header')) {

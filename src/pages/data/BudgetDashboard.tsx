@@ -1,6 +1,7 @@
-import { AlertTriangle, ArrowDownRight, ArrowUpRight, Info, PiggyBank, Plus } from 'lucide-react'
+import { AlertTriangle, ArrowUpRight, Info, PiggyBank, Plus } from 'lucide-react'
 
-import { Button, SegmentedControl, Surface } from '../../components/ui'
+import { InsightBudgetChart, InsightHero, InsightMetric, InsightMetricGrid, InsightPanel } from '../../components/insight'
+import { Button, SegmentedControl } from '../../components/ui'
 import { formatCurrencyFromCents } from '../../lib/format'
 import type { BudgetResource } from '../../lib/monatis-api'
 import type { BudgetExecutionSummary } from './budget-execution'
@@ -15,12 +16,19 @@ interface BudgetDashboardProps {
 
 export function BudgetDashboard({ resource, executionSummary, onCreate, onResourceChange }: BudgetDashboardProps) {
   return (
-    <Surface className="budget-dashboard">
+    <InsightPanel className="budget-dashboard" help="Synthese budgets : montre la consommation globale, les alertes et le type de reference actuellement analyse.">
       <div className="budget-command-bar">
-        <div>
-          <h2>Budgets</h2>
-          <p>Choisis le type de reference budgetaire. Chaque budget cible une seule reference.</p>
-        </div>
+        <InsightHero
+          eyebrow="Budgets"
+          value={formatCurrencyFromCents(executionSummary.remainingExpenseCents)}
+          subtitle="Disponible sur les budgets de sorties actifs"
+          icon={PiggyBank}
+          tone={executionSummary.alertCount ? 'warning' : 'success'}
+          tags={[
+            { label: budgetResourceModeLabel(resource) },
+            { label: `${executionSummary.totalCount} budget(s)` },
+          ]}
+        />
         <Button tone="soft" onClick={onCreate}>
           <Plus size={16} />
           Nouveau budget
@@ -37,34 +45,24 @@ export function BudgetDashboard({ resource, executionSummary, onCreate, onResour
         </div>
       </div>
 
-      <div className="budget-summary-grid" aria-label="Synthese des budgets">
-        <div className="budget-summary-item income">
-          <ArrowUpRight size={18} />
-          <span>Entrees realisees</span>
-          <strong>{formatCurrencyFromCents(executionSummary.executedIncomeCents)}</strong>
-          <small>sur {formatCurrencyFromCents(executionSummary.plannedIncomeCents)}</small>
-        </div>
-        <div className="budget-summary-item expense">
-          <ArrowDownRight size={18} />
-          <span>Sorties consommees</span>
-          <strong>{formatCurrencyFromCents(executionSummary.executedExpenseCents)}</strong>
-          <small>sur {formatCurrencyFromCents(executionSummary.plannedExpenseCents)}</small>
-        </div>
-        <div className="budget-summary-item net">
-          <PiggyBank size={18} />
-          <span>Disponible sorties</span>
-          <strong>{formatCurrencyFromCents(executionSummary.remainingExpenseCents)}</strong>
-          <small>reste entre les limites actives</small>
-        </div>
-        <div className="budget-summary-item current">
-          <AlertTriangle size={18} />
-          <span>Alertes actives</span>
-          <strong>
-            {executionSummary.alertCount}/{executionSummary.currentCount}
-          </strong>
-          <small>{executionSummary.totalCount} budgets charges</small>
-        </div>
-      </div>
-    </Surface>
+      <InsightMetricGrid>
+        <InsightMetric icon={ArrowUpRight} label="Entrees realisees" value={formatCurrencyFromCents(executionSummary.executedIncomeCents)} hint={`sur ${formatCurrencyFromCents(executionSummary.plannedIncomeCents)}`} tone="success" />
+        <InsightMetric icon={PiggyBank} label="Objectif sorties" value={formatCurrencyFromCents(executionSummary.plannedExpenseCents)} hint={`${executionSummary.currentCount} budget(s) actif(s)`} />
+        <InsightMetric icon={PiggyBank} label="Budgets actifs" value={`${executionSummary.currentCount}/${executionSummary.totalCount}`} hint={budgetResourceModeLabel(resource)} />
+        <InsightMetric icon={AlertTriangle} label="Alertes actives" value={`${executionSummary.alertCount}/${executionSummary.currentCount}`} hint={`${executionSummary.totalCount} budgets charges`} tone={executionSummary.alertCount ? 'warning' : 'success'} />
+      </InsightMetricGrid>
+
+      <InsightBudgetChart
+        chartId="data.budgets.consumption"
+        eyebrow="Consommation"
+        title="Sorties suivies"
+        subtitle="Le reste devient un dépassement si la limite est franchie"
+        help="Jauge budget : compare les sorties consommees a l'objectif des budgets actifs et signale le disponible ou le depassement."
+        plannedValue={executionSummary.plannedExpenseCents}
+        actualValue={executionSummary.executedExpenseCents}
+        remainingValue={executionSummary.remainingExpenseCents}
+        formatValue={formatCurrencyFromCents}
+      />
+    </InsightPanel>
   )
 }

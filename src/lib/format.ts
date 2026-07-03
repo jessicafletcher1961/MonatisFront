@@ -105,6 +105,15 @@ export function dayBefore(iso: string): string {
   return isoDate(addDays(parsed, -1))
 }
 
+export function dayAfter(iso: string): string {
+  const parsed = parseISO(iso)
+  if (!isValid(parsed)) {
+    return ''
+  }
+
+  return isoDate(addDays(parsed, 1))
+}
+
 function clampPeriod(start: Date, end: Date, min: Date, max: Date): { start: Date; end: Date } | null {
   const effectiveStart = isBefore(start, min) ? min : start
   const effectiveEnd = isAfter(end, max) ? max : end
